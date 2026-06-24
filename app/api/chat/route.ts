@@ -1,7 +1,7 @@
 import { streamText, stepCountIs } from 'ai';
 import { zodSchema } from '@ai-sdk/provider-utils';
 import { z } from 'zod';
-import { model } from '@/lib/openrouter';
+import { model } from '@/lib/anthropic';
 import {
   getNextTask,
   markTaskDone,
@@ -31,10 +31,10 @@ Start by calling getNextTask to fetch the first task, then have a brief voice co
 Keep responses concise — this is a voice conversation, not a text chat. Aim for 1-3 sentences per response. When proposing to mark done or skip, briefly state what you're about to do and do it.`;
 
 export async function POST(request: Request) {
-  if (!process.env.OPENROUTER_API_KEY) {
+  if (!process.env.ANTHROPIC_API_KEY) {
     return new Response(
       JSON.stringify({
-        error: 'OPENROUTER_API_KEY is not configured. Set it in your environment variables.',
+        error: 'ANTHROPIC_API_KEY is not configured. Set it in your environment variables.',
       }),
       { status: 503, headers: { 'Content-Type': 'application/json' } }
     );
