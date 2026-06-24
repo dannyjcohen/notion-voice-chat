@@ -27,10 +27,18 @@ export async function POST(request: Request) {
     return Response.json({ transcript: '' });
   }
 
-  // iOS Safari sends audio/mp4, desktop Chrome sends audio/webm
-  // Whisper accepts both — just need correct file extension
+  // Map MIME type to a file extension Whisper recognises.
+  // VAD path sends audio/wav; hold-to-speak sends audio/webm (Chrome) or
+  // audio/mp4 (iOS Safari).
   const mimeType = audioBlob.type;
-  const ext = mimeType.includes('mp4') ? 'm4a' : 'webm';
+  let ext: string;
+  if (mimeType.includes('wav')) {
+    ext = 'wav';
+  } else if (mimeType.includes('mp4') || mimeType.includes('m4a')) {
+    ext = 'm4a';
+  } else {
+    ext = 'webm';
+  }
   const filename = `audio.${ext}`;
 
   // Convert the File to a format OpenAI SDK accepts
@@ -46,6 +54,30 @@ export async function POST(request: Request) {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[transcribe] Whisper error:', message);
+
+    // Quota exceeded — surface as 402 with a clear message rather than 500
+    if (message.includes('429') || message.toLowerCase().includes('quota')) {
+      return Response.json(
+        { error: 'OpenAI quota exceeded. Add credits at platform.openai.com/account/billing.' },
+        { status: 402 }
+      );
+    }
+
+    // Whisper rejects silent or near-silent audio — treat as empty transcript
+    // rather than crashing. Common messages: "Audio file is too short",
+    // "Invalid file format", "no audio".
+    const lc = message.toLowerCase();
+    if (
+      lc.includes('too short') ||
+      lc.includes('no audio') ||
+      lc.includes('no speech') ||
+      lc.includes('invalid file') ||
+      lc.includes('could not process')
+    ) {
+      console.warn('[transcribe] Treating Whisper rejection as empty transcript:', message);
+      return Response.json({ transcript: '' });
+    }
+
     return Response.json({ error: message }, { status: 500 });
   }
 }

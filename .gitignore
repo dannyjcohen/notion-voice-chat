@@ -39,3 +39,11 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+.vercel
+
+# test artifacts
+test-audio.wav
+scripts/gen-test-wav.js
+test-results/
+verify-screenshot.png
