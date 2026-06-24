@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 export interface DebugEvent {
   time: string;
@@ -18,12 +18,12 @@ export function useDebugLog() {
   const [events, setEvents] = useState<DebugEvent[]>([]);
   const [lastApiCall, setLastApiCall] = useState<ApiCall | null>(null);
 
-  const log = (message: string) => {
+  const log = useCallback((message: string) => {
     const time = new Date().toTimeString().slice(0, 8);
     setEvents((prev) => [{ time, message }, ...prev].slice(0, 20));
-  };
+  }, []);
 
-  const logApiStart = (endpoint: string): number => {
+  const logApiStart = useCallback((endpoint: string): number => {
     const start = Date.now();
     const time = new Date().toTimeString().slice(0, 8);
     setEvents((prev) =>
@@ -31,9 +31,9 @@ export function useDebugLog() {
     );
     setLastApiCall({ endpoint, status: 'pending' });
     return start;
-  };
+  }, []);
 
-  const logApiEnd = (
+  const logApiEnd = useCallback((
     endpoint: string,
     status: number,
     startTime: number,
@@ -50,7 +50,7 @@ export function useDebugLog() {
       duration: parseFloat(duration),
       responsePreview,
     });
-  };
+  }, []);
 
   return { events, lastApiCall, log, logApiStart, logApiEnd };
 }
