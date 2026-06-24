@@ -29,86 +29,92 @@ export async function POST(request: Request) {
 
   const { messages } = await request.json();
 
-  const result = streamText({
-    model,
-    system: SYSTEM_PROMPT,
-    messages,
-    stopWhen: stepCountIs(10),
-    tools: {
-      getNextTask: {
-        description:
-          'Fetch the next unreviewed task from the Notion task queue. Returns the task details or indicates the queue is empty.',
-        inputSchema: zodSchema(z.object({})),
-        execute: async () => {
-          const task = await getNextTask();
-          if (!task) {
-            return { empty: true, message: 'No more tasks in the queue.' };
-          }
-          return { empty: false, task };
+  try {
+    const result = streamText({
+      model,
+      system: SYSTEM_PROMPT,
+      messages,
+      stopWhen: stepCountIs(10),
+      tools: {
+        getNextTask: {
+          description:
+            'Fetch the next unreviewed task from the Notion task queue. Returns the task details or indicates the queue is empty.',
+          inputSchema: zodSchema(z.object({})),
+          execute: async () => {
+            const task = await getNextTask();
+            if (!task) {
+              return { empty: true, message: 'No more tasks in the queue.' };
+            }
+            return { empty: false, task };
+          },
+        },
+        markTaskDone: {
+          description:
+            'Mark a Notion task as completed by setting its AI Clean Up Status to Completed.',
+          inputSchema: zodSchema(
+            z.object({
+              taskId: z.string().describe('The Notion page ID of the task to mark as done.'),
+            })
+          ),
+          execute: async ({ taskId }: { taskId: string }) => {
+            await markTaskDone(taskId);
+            return { success: true, message: `Task ${taskId} marked as completed.` };
+          },
+        },
+        skipTask: {
+          description: "Skip a Notion task by rescheduling it to tomorrow's date.",
+          inputSchema: zodSchema(
+            z.object({
+              taskId: z.string().describe('The Notion page ID of the task to skip.'),
+            })
+          ),
+          execute: async ({ taskId }: { taskId: string }) => {
+            await skipTask(taskId);
+            const tomorrow = new Date();
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            const dateStr = tomorrow.toISOString().split('T')[0];
+            return {
+              success: true,
+              message: `Task ${taskId} rescheduled to ${dateStr}.`,
+            };
+          },
+        },
+        updateTaskFields: {
+          description:
+            'Update one or more fields on a Notion task: title, description, or due date.',
+          inputSchema: zodSchema(
+            z.object({
+              taskId: z.string().describe('The Notion page ID of the task to update.'),
+              title: z.string().optional().describe('New title for the task.'),
+              description: z.string().optional().describe('New description for the task.'),
+              dueDate: z
+                .string()
+                .optional()
+                .describe('New due date in YYYY-MM-DD format.'),
+            })
+          ),
+          execute: async ({
+            taskId,
+            title,
+            description,
+            dueDate,
+          }: {
+            taskId: string;
+            title?: string;
+            description?: string;
+            dueDate?: string;
+          }) => {
+            await updateTaskFields(taskId, { title, description, dueDate });
+            return { success: true, message: `Task ${taskId} updated.` };
+          },
         },
       },
-      markTaskDone: {
-        description:
-          'Mark a Notion task as completed by setting its AI Clean Up Status to Completed.',
-        inputSchema: zodSchema(
-          z.object({
-            taskId: z.string().describe('The Notion page ID of the task to mark as done.'),
-          })
-        ),
-        execute: async ({ taskId }: { taskId: string }) => {
-          await markTaskDone(taskId);
-          return { success: true, message: `Task ${taskId} marked as completed.` };
-        },
-      },
-      skipTask: {
-        description: "Skip a Notion task by rescheduling it to tomorrow's date.",
-        inputSchema: zodSchema(
-          z.object({
-            taskId: z.string().describe('The Notion page ID of the task to skip.'),
-          })
-        ),
-        execute: async ({ taskId }: { taskId: string }) => {
-          await skipTask(taskId);
-          const tomorrow = new Date();
-          tomorrow.setDate(tomorrow.getDate() + 1);
-          const dateStr = tomorrow.toISOString().split('T')[0];
-          return {
-            success: true,
-            message: `Task ${taskId} rescheduled to ${dateStr}.`,
-          };
-        },
-      },
-      updateTaskFields: {
-        description:
-          'Update one or more fields on a Notion task: title, description, or due date.',
-        inputSchema: zodSchema(
-          z.object({
-            taskId: z.string().describe('The Notion page ID of the task to update.'),
-            title: z.string().optional().describe('New title for the task.'),
-            description: z.string().optional().describe('New description for the task.'),
-            dueDate: z
-              .string()
-              .optional()
-              .describe('New due date in YYYY-MM-DD format.'),
-          })
-        ),
-        execute: async ({
-          taskId,
-          title,
-          description,
-          dueDate,
-        }: {
-          taskId: string;
-          title?: string;
-          description?: string;
-          dueDate?: string;
-        }) => {
-          await updateTaskFields(taskId, { title, description, dueDate });
-          return { success: true, message: `Task ${taskId} updated.` };
-        },
-      },
-    },
-  });
+    });
 
-  return result.toTextStreamResponse();
+    return result.toTextStreamResponse();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[chat] streamText error:', message);
+    return Response.json({ error: message }, { status: 500 });
+  }
 }

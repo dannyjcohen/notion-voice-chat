@@ -22,6 +22,11 @@ export async function POST(request: Request) {
     );
   }
 
+  // Guard against empty or near-empty audio (too short to contain real speech)
+  if (audioBlob.size < 1000) {
+    return Response.json({ transcript: '' });
+  }
+
   // iOS Safari sends audio/mp4, desktop Chrome sends audio/webm
   // Whisper accepts both — just need correct file extension
   const mimeType = audioBlob.type;
@@ -32,13 +37,15 @@ export async function POST(request: Request) {
   const buffer = await audioBlob.arrayBuffer();
   const file = new File([buffer], filename, { type: mimeType });
 
-  const transcription = await openai.audio.transcriptions.create({
-    file,
-    model: 'whisper-1',
-  });
-
-  return new Response(
-    JSON.stringify({ transcript: transcription.text }),
-    { status: 200, headers: { 'Content-Type': 'application/json' } }
-  );
+  try {
+    const transcription = await openai.audio.transcriptions.create({
+      file,
+      model: 'whisper-1',
+    });
+    return Response.json({ transcript: transcription.text });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[transcribe] Whisper error:', message);
+    return Response.json({ error: message }, { status: 500 });
+  }
 }
