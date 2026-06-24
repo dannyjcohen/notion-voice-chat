@@ -337,6 +337,11 @@ export default function VoiceChat() {
     onSpeechStart: () => {
       log('speech start detected');
     },
+    // Point ONNX runtime and VAD assets to files served from public/
+    // Without this, Turbopack tries to serve ort-wasm-simd-threaded.mjs from
+    // /_next/static/chunks/ which 404s.
+    baseAssetPath: '/',
+    onnxWASMBasePath: '/',
   });
 
   // Track whether VAD errored so we can show hold-to-speak fallback
