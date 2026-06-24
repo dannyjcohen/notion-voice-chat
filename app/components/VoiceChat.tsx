@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import TaskCard from './TaskCard';
 import StatusIndicator from './StatusIndicator';
 import DebugPanel from './DebugPanel';
@@ -17,10 +17,22 @@ interface Message {
   content: string;
 }
 
-interface CurrentTask {
+interface Task {
+  id: string;
   title: string;
   priority: string | null;
-  date: string | null;
+  dateToWorkOn: string | null;
+  status: string | null;
+  description: string | null;
+  effort: string | null;
+  aiCleanUpStatus: string | null;
+  projectId: string | null;
+  projectName: string | null;
+}
+
+interface Project {
+  id: string;
+  name: string;
   description: string | null;
 }
 
@@ -44,8 +56,6 @@ function getErrorMessage(line: string): string | null {
   return m ? m[1] : null;
 }
 
-// Strip [TOOL:...], [TOOL_RESULT:...], and [ERROR:...] lines from text.
-// Returns cleaned text, extracted tool event strings, and any error messages.
 function extractToolLines(text: string): { cleaned: string; toolEvents: string[]; errorMessages: string[] } {
   const lines = text.split('\n');
   const toolEvents: string[] = [];
@@ -64,21 +74,16 @@ function extractToolLines(text: string): { cleaned: string; toolEvents: string[]
   return { cleaned: kept.join('\n'), toolEvents, errorMessages };
 }
 
-// ── Empty-state detector ───────────────────────────────────────────────────
-
-const EMPTY_PHRASES = [
-  'no more tasks',
-  "all done",
-  'queue is empty',
-  'nothing left',
-  'all caught up',
-  'no tasks remaining',
-  'nothing to review',
-];
-
-function detectEmpty(text: string): boolean {
-  const lower = text.toLowerCase();
-  return EMPTY_PHRASES.some((phrase) => lower.includes(phrase));
+// ── Simple markdown bold renderer ─────────────────────────────────────────
+// Renders **text** as <strong> in chat bubbles. No external dependency.
+function renderMarkdown(text: string): React.ReactNode[] {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      return <strong key={i}>{part.slice(2, -2)}</strong>;
+    }
+    return part;
+  });
 }
 
 // ── TTS helpers ────────────────────────────────────────────────────────────
@@ -108,27 +113,27 @@ async function speakSentence(text: string): Promise<void> {
 
 export default function VoiceChat() {
   const [voiceState, setVoiceState] = useState<VoiceState>('idle');
+
+  // New architecture state
+  const [currentTask, setCurrentTask] = useState<Task | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [skipList, setSkipList] = useState<string[]>([]);
+  const [sessionDone, setSessionDone] = useState(false);
+  const [sessionStarted, setSessionStarted] = useState(false);
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [responseText, setResponseText] = useState('');
-  const [currentTask, setCurrentTask] = useState<CurrentTask | null>(null);
   const [holdToSpeak, setHoldToSpeak] = useState(false);
 
-  // Debug messages — rendered inline in the chat list as distinct bubbles
   const [debugMessages, setDebugMessages] = useState<DebugMessage[]>([]);
   const debugMsgCounterRef = useRef(0);
 
-  // Whether the session has reached the empty/caught-up state
-  const [isSessionEmpty, setIsSessionEmpty] = useState(false);
-
-  // Per-message push timestamps so debug bubbles can be interleaved by arrival time
   const msgTimestampsRef = useRef<number[]>([]);
 
-  // Helper: push one or more messages and record their push timestamps
   const pushMessages = useCallback((newMsgs: Message[]) => {
     const now = Date.now();
     setMessages((prev) => {
       const next = [...prev, ...newMsgs];
-      // Record a timestamp for each new message
       for (let i = prev.length; i < next.length; i++) {
         msgTimestampsRef.current[i] = now;
       }
@@ -136,15 +141,21 @@ export default function VoiceChat() {
     });
   }, []);
 
-  // TTS enabled preference (persisted to localStorage)
+  const addMessage = useCallback((role: 'user' | 'assistant', content: string) => {
+    const now = Date.now();
+    setMessages((prev) => {
+      const next = [...prev, { role, content }];
+      msgTimestampsRef.current[next.length - 1] = now;
+      return next;
+    });
+  }, []);
+
   const [ttsEnabled, setTtsEnabled] = useState<boolean>(() => {
     if (typeof window === 'undefined') return true;
     return localStorage.getItem('ttsEnabled') !== 'false';
   });
   const ttsEnabledRef = useRef(ttsEnabled);
-  useEffect(() => {
-    ttsEnabledRef.current = ttsEnabled;
-  }, [ttsEnabled]);
+  useEffect(() => { ttsEnabledRef.current = ttsEnabled; }, [ttsEnabled]);
 
   const toggleTts = useCallback(() => {
     setTtsEnabled((prev) => {
@@ -154,74 +165,50 @@ export default function VoiceChat() {
     });
   }, []);
 
-  // Text input state
   const [textInput, setTextInput] = useState('');
-
-  // Transcript flash state (shows briefly after VAD transcription)
   const [transcriptFlash, setTranscriptFlash] = useState('');
   const transcriptFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Debug mode — read from URL param via useEffect to avoid SSR issues
   const [debugMode, setDebugMode] = useState(false);
   useEffect(() => {
     setDebugMode(new URLSearchParams(window.location.search).get('debug') === '1');
   }, []);
 
-  // Debug log hook
   const { events, lastApiCall, log, logApiStart, logApiEnd } = useDebugLog();
-
-  // Last sent payload ref for debug panel
   const lastPayloadRef = useRef<Message[]>([]);
-
-  // Chat message list scroll ref
   const chatListRef = useRef<HTMLDivElement>(null);
 
-  // Helper: setState with logging
   const setVoiceStateLogged = useCallback(
     (next: VoiceState) => {
       setVoiceState((prev) => {
-        if (prev !== next) {
-          log(`state: ${prev} → ${next}`);
-        }
+        if (prev !== next) log(`state: ${prev} → ${next}`);
         return next;
       });
     },
     [log]
   );
 
-  // Helper: add a debug bubble into the chat list (only when debugMode is on)
   const addDebugMessage = useCallback((content: string) => {
     const id = `debug-${Date.now()}-${debugMsgCounterRef.current++}`;
     setDebugMessages((prev) => [...prev, { id, timestamp: Date.now(), content }]);
   }, []);
 
-  // Auto-scroll chat list to bottom on new messages
   useEffect(() => {
     if (chatListRef.current) {
       chatListRef.current.scrollTop = chatListRef.current.scrollHeight;
     }
   }, [messages, responseText, debugMessages]);
 
-  // Show a transcript flash briefly, then clear
   const showTranscriptFlash = useCallback((text: string) => {
     setTranscriptFlash(text);
-    if (transcriptFlashTimerRef.current) {
-      clearTimeout(transcriptFlashTimerRef.current);
-    }
-    transcriptFlashTimerRef.current = setTimeout(() => {
-      setTranscriptFlash('');
-    }, 2500);
+    if (transcriptFlashTimerRef.current) clearTimeout(transcriptFlashTimerRef.current);
+    transcriptFlashTimerRef.current = setTimeout(() => setTranscriptFlash(''), 2500);
   }, []);
 
-  // TTS queue state
   const ttsQueueRef = useRef<string[]>([]);
   const ttsDrainingRef = useRef(false);
-
-  // Fallback recording for hold-to-speak
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const holdChunksRef = useRef<Blob[]>([]);
-
-  // VAD active flag to know whether we launched VAD successfully
   const vadActiveRef = useRef(false);
 
   // ── TTS queue drainer ────────────────────────────────────────────────────
@@ -242,7 +229,6 @@ export default function VoiceChat() {
     }
 
     ttsDrainingRef.current = false;
-    // After TTS drains, start listening again (VAD or hold-to-speak)
     if (vadActiveRef.current) {
       setVoiceStateLogged('listening');
     } else {
@@ -250,13 +236,92 @@ export default function VoiceChat() {
     }
   }, [setVoiceStateLogged, log]);
 
-  // ── Streaming chat ────────────────────────────────────────────────────────
+  // ── Fetch next task ───────────────────────────────────────────────────────
+
+  const fetchNextTask = useCallback(async (currentSkipList: string[]) => {
+    const skipParam = currentSkipList.join(',');
+    const url = `/api/tasks/next${skipParam ? `?skip=${encodeURIComponent(skipParam)}` : ''}`;
+    const res = await fetch(url);
+    const data = await res.json() as { task: Task | null };
+    if (!data.task) {
+      setSessionDone(true);
+      addMessage('assistant', 'All caught up — no more tasks to review!');
+      return;
+    }
+    setCurrentTask(data.task);
+    addMessage('assistant', `Next task: **${data.task.title}**`);
+  }, [addMessage]);
+
+  // ── Handle AI response (JSON action or follow-up text) ───────────────────
+
+  const currentTaskRef = useRef<Task | null>(null);
+  const skipListRef = useRef<string[]>([]);
+
+  // Keep refs in sync with state
+  useEffect(() => { currentTaskRef.current = currentTask; }, [currentTask]);
+  useEffect(() => { skipListRef.current = skipList; }, [skipList]);
+
+  const handleAIResponse = useCallback(async (responseText: string) => {
+    // Strip markdown code fences (```json ... ```) if present
+    let trimmed = responseText.trim();
+    const codeFenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
+    if (codeFenceMatch) trimmed = codeFenceMatch[1].trim();
+
+    // Also try to extract JSON object from mixed text
+    if (!trimmed.startsWith('{')) {
+      const jsonMatch = trimmed.match(/\{[\s\S]*"action"[\s\S]*\}/);
+      if (jsonMatch) trimmed = jsonMatch[0];
+    }
+
+    try {
+      const action = JSON.parse(trimmed) as { action: string; fields?: Record<string, string> };
+      if (action.action === 'skip' && currentTaskRef.current) {
+        const newSkipList = [...skipListRef.current, currentTaskRef.current.id];
+        setSkipList(newSkipList);
+        await fetchNextTask(newSkipList);
+      } else if (action.action === 'update' && action.fields && currentTaskRef.current) {
+        await fetch('/api/tasks/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ taskId: currentTaskRef.current.id, fields: action.fields }),
+        });
+        addMessage('assistant', 'Task updated! Pulling the next one...');
+        await fetchNextTask(skipListRef.current);
+      }
+    } catch {
+      // Not JSON — it's a follow-up question, display it normally (already in messages)
+    }
+  }, [fetchNextTask, addMessage]);
+
+  // ── Load session on mount ─────────────────────────────────────────────────
+
+  const loadSession = useCallback(async () => {
+    log('loadSession: fetching projects + first task');
+    const [projectsRes, taskRes] = await Promise.all([
+      fetch('/api/projects'),
+      fetch('/api/tasks/next'),
+    ]);
+
+    const projectsData = await projectsRes.json() as { projects: Project[] };
+    const taskData = await taskRes.json() as { task: Task | null };
+
+    setProjects(projectsData.projects ?? []);
+
+    if (!taskData.task) {
+      setSessionDone(true);
+      addMessage('assistant', 'All caught up — no more tasks to review!');
+      return;
+    }
+
+    setCurrentTask(taskData.task);
+    addMessage('assistant', `Let's get started. First task: **${taskData.task.title}**`);
+  }, [log, addMessage]);
+
+  // ── Streaming chat send ───────────────────────────────────────────────────
 
   const sendMessages = useCallback(async (msgs: Message[]) => {
     setVoiceStateLogged('processing');
     setResponseText('');
-
-    // Record last payload for debug panel
     lastPayloadRef.current = msgs;
 
     let fullText = '';
@@ -269,24 +334,21 @@ export default function VoiceChat() {
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: msgs }),
+        body: JSON.stringify({
+          messages: msgs,
+          currentTask: currentTaskRef.current,
+          projects: projects,
+        }),
       });
 
       if (!response.ok || !response.body) {
-        // Try to capture response body for debug preview
         let errorPreview: string | undefined;
-        try {
-          errorPreview = await response.text();
-        } catch {
-          // ignore
-        }
+        try { errorPreview = await response.text(); } catch { /* ignore */ }
         const durationS = ((Date.now() - startTime) / 1000).toFixed(1);
         logApiEnd('/api/chat', response.status, startTime, errorPreview);
         if (debugMode) {
-          addDebugMessage(`📡 /api/chat  ${response.status}  ${durationS}s\n   msgs sent: ${msgs.length}  |  tokens est: ~${Math.round(msgs.reduce((sum, m) => sum + m.content.length, 0) / 4)}`);
+          addDebugMessage(`/api/chat ${response.status} ${durationS}s — ${errorPreview ?? ''}`);
         }
-
-        // Show user-visible error for non-ok responses
         setResponseText(
           response.status === 503
             ? 'API not configured — check environment variables.'
@@ -307,7 +369,6 @@ export default function VoiceChat() {
         const chunk = decoder.decode(value, { stream: true });
         const { cleaned, toolEvents, errorMessages } = extractToolLines(chunk);
 
-        // Log any tool events to debug panel and inject debug bubbles
         for (const event of toolEvents) {
           log(event);
           if (debugMode) {
@@ -316,43 +377,27 @@ export default function VoiceChat() {
             if (toolCallMatch) {
               const [, name, rawArgs] = toolCallMatch;
               let prettyArgs: string;
-              try {
-                prettyArgs = JSON.stringify(JSON.parse(rawArgs), null, 2);
-              } catch {
-                prettyArgs = rawArgs;
-              }
-              addDebugMessage(`🔧 ${name} called\n   args: ${prettyArgs}`);
+              try { prettyArgs = JSON.stringify(JSON.parse(rawArgs), null, 2); }
+              catch { prettyArgs = rawArgs; }
+              addDebugMessage(`tool ${name} called — ${prettyArgs}`);
             } else if (toolResultMatch) {
               const [, name, rawResult] = toolResultMatch;
               let prettyResult: string;
-              try {
-                prettyResult = JSON.stringify(JSON.parse(rawResult), null, 2);
-              } catch {
-                prettyResult = rawResult;
-              }
-              const truncated = prettyResult.length > 800 ? prettyResult.slice(0, 800) + '…' : prettyResult;
-              addDebugMessage(`↩ ${name} result\n   ${truncated}`);
+              try { prettyResult = JSON.stringify(JSON.parse(rawResult), null, 2); }
+              catch { prettyResult = rawResult; }
+              addDebugMessage(`${name} result — ${prettyResult.slice(0, 800)}`);
             }
           }
         }
 
-        // Surface API errors to debug log and as a user-visible message
         for (const errMsg of errorMessages) {
           log(`[ERROR] ${errMsg}`);
-          if (debugMode) {
-            addDebugMessage(`⚠ Error: ${errMsg}`);
-          }
+          if (debugMode) addDebugMessage(`Error: ${errMsg}`);
           if (!fullText) {
-            // Only show error UI if we haven't received any text yet
             setResponseText(`Error: ${errMsg}`);
             setTimeout(() => setResponseText(''), 5000);
             setVoiceStateLogged('unlocked');
             logApiEnd('/api/chat', 0, startTime, errMsg);
-            if (debugMode) {
-              const durationS = ((Date.now() - startTime) / 1000).toFixed(1);
-              const tokenEst = Math.round(msgs.reduce((sum, m) => sum + m.content.length, 0) / 4);
-              addDebugMessage(`📡 /api/chat  0  ${durationS}s\n   msgs sent: ${msgs.length}  |  tokens est: ~${tokenEst}`);
-            }
             reader.cancel();
             return;
           }
@@ -360,9 +405,12 @@ export default function VoiceChat() {
 
         fullText += cleaned;
         sentenceBuffer += cleaned;
-        setResponseText(fullText);
+        // Don't show JSON action responses in the live streaming preview
+        const looksLikeAction = fullText.trimStart().startsWith('{') || fullText.trimStart().startsWith('```');
+        if (!looksLikeAction) {
+          setResponseText(fullText);
+        }
 
-        // Push complete sentences to TTS queue (skip lines that look like tool markers)
         const sentences = sentenceBuffer.match(/[^.!?]+[.!?]+/g) ?? [];
         for (const s of sentences) {
           const trimmed = s.trim();
@@ -371,42 +419,35 @@ export default function VoiceChat() {
           }
         }
         if (sentences.length > 0) {
-          // Strip everything up to and including the last sentence-ending punctuation.
           sentenceBuffer = sentenceBuffer.replace(/[\s\S]*[.!?]+/, '');
-          if (!ttsDrainingRef.current) {
-            drainTtsQueue();
-          }
+          if (!ttsDrainingRef.current) drainTtsQueue();
         }
       }
 
-      // Push any remaining buffer
       const remaining = sentenceBuffer.trim();
       if (remaining && !isToolLine(remaining)) {
         ttsQueueRef.current.push(remaining);
-        if (!ttsDrainingRef.current) {
-          drainTtsQueue();
-        }
+        if (!ttsDrainingRef.current) drainTtsQueue();
       }
 
-      const durationS = ((Date.now() - startTime) / 1000).toFixed(1);
       logApiEnd('/api/chat', response.status, startTime, fullText.slice(0, 200));
-
-      // Inject API call summary debug bubble
       if (debugMode) {
-        const tokenEst = Math.round(msgs.reduce((sum, m) => sum + m.content.length, 0) / 4);
-        addDebugMessage(`📡 /api/chat  ${response.status}  ${durationS}s\n   msgs sent: ${msgs.length}  |  tokens est: ~${tokenEst}`);
+        const durationS = ((Date.now() - startTime) / 1000).toFixed(1);
+        addDebugMessage(`/api/chat ${response.status} ${durationS}s`);
       }
 
-      // Update messages with assistant response
-      pushMessages([{ role: 'assistant', content: fullText }]);
+      // Detect JSON actions — don't add them to visible chat history
+      const isJsonAction = /\{[\s\S]*"action"[\s\S]*\}/.test(fullText.trim()) ||
+        /^```(?:json)?\s*\{[\s\S]*"action"[\s\S]*\}\s*```$/.test(fullText.trim());
+
+      // Add assistant message to history only for non-action responses
+      if (fullText.trim() && !isJsonAction) {
+        pushMessages([{ role: 'assistant', content: fullText }]);
+      }
       setResponseText('');
 
-      // Detect empty state — instead of full-screen overlay, add inline message and disable input
-      if (detectEmpty(fullText)) {
-        pushMessages([{ role: 'assistant', content: '✅ All caught up — no more tasks to review.' }]);
-        setIsSessionEmpty(true);
-        return;
-      }
+      // Handle AI action response (skip/update) or follow-up question
+      await handleAIResponse(fullText);
 
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -414,7 +455,10 @@ export default function VoiceChat() {
       logApiEnd('/api/chat', 0, startTime, message);
       setVoiceStateLogged('unlocked');
     }
-  }, [drainTtsQueue, setVoiceStateLogged, log, logApiStart, logApiEnd, debugMode, addDebugMessage, pushMessages]);
+  }, [
+    drainTtsQueue, setVoiceStateLogged, log, logApiStart, logApiEnd,
+    debugMode, addDebugMessage, pushMessages, handleAIResponse, projects,
+  ]);
 
   // ── Text input submit ─────────────────────────────────────────────────────
 
@@ -422,41 +466,23 @@ export default function VoiceChat() {
     const text = textInput.trim();
     if (!text) return;
     if (voiceState === 'processing' || voiceState === 'speaking') return;
+    if (sessionDone) return;
 
     setTextInput('');
     const newMessage: Message = { role: 'user', content: text };
     const updated = [...messages, newMessage];
     pushMessages([newMessage]);
     sendMessages(updated);
-  }, [textInput, voiceState, messages, sendMessages, pushMessages]);
+  }, [textInput, voiceState, messages, sendMessages, pushMessages, sessionDone]);
 
   const handleTextKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        handleTextSubmit();
-      }
+      if (e.key === 'Enter') { e.preventDefault(); handleTextSubmit(); }
     },
     [handleTextSubmit]
   );
 
-  // ── Manual Done / Skip buttons ────────────────────────────────────────────
-
-  const handleDone = useCallback(() => {
-    const newMessage: Message = { role: 'user', content: 'Mark this task as done.' };
-    const updated = [...messages, newMessage];
-    pushMessages([newMessage]);
-    sendMessages(updated);
-  }, [messages, sendMessages, pushMessages]);
-
-  const handleSkip = useCallback(() => {
-    const newMessage: Message = { role: 'user', content: 'Skip this task to tomorrow.' };
-    const updated = [...messages, newMessage];
-    pushMessages([newMessage]);
-    sendMessages(updated);
-  }, [messages, sendMessages, pushMessages]);
-
-  // ── Hold-to-speak recording ────────────────────────────────────────────────
+  // ── Hold-to-speak recording ───────────────────────────────────────────────
 
   const startHoldRecord = useCallback(async () => {
     log('hold-to-speak recording started');
@@ -481,7 +507,7 @@ export default function VoiceChat() {
           logApiEnd('/api/transcribe', res.status, tStartTime, data.transcript);
           const transcript: string = data.transcript ?? '';
           if (transcript.trim()) {
-            if (debugMode) addDebugMessage(`🎤 Transcribed: "${transcript}"`);
+            if (debugMode) addDebugMessage(`Transcribed: "${transcript}"`);
             showTranscriptFlash(transcript);
             const newMessage: Message = { role: 'user', content: transcript };
             const updated = [...messages, newMessage];
@@ -503,7 +529,6 @@ export default function VoiceChat() {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log(`hold-to-speak mic error: ${message}`);
-      // Mic permission denied — stay unlocked
     }
   }, [messages, sendMessages, setVoiceStateLogged, log, logApiStart, logApiEnd, showTranscriptFlash, debugMode, addDebugMessage, pushMessages]);
 
@@ -512,7 +537,7 @@ export default function VoiceChat() {
     mediaRecorderRef.current = null;
   }, []);
 
-  // ── VAD speech-end handler ─────────────────────────────────────────────────
+  // ── VAD speech-end handler ────────────────────────────────────────────────
 
   const handleVADSpeechEnd = useCallback(
     async (audio: Float32Array) => {
@@ -529,7 +554,7 @@ export default function VoiceChat() {
         logApiEnd('/api/transcribe', res.status, tStartTime, data.transcript);
         const transcript: string = data.transcript ?? '';
         if (transcript.trim()) {
-          if (debugMode) addDebugMessage(`🎤 Transcribed: "${transcript}"`);
+          if (debugMode) addDebugMessage(`Transcribed: "${transcript}"`);
           showTranscriptFlash(transcript);
           const newMessage: Message = { role: 'user', content: transcript };
           const updated = [...messages, newMessage];
@@ -553,17 +578,11 @@ export default function VoiceChat() {
   const vad = useMicVAD({
     startOnLoad: false,
     onSpeechEnd: handleVADSpeechEnd,
-    onSpeechStart: () => {
-      log('speech start detected');
-    },
-    // Point ONNX runtime and VAD assets to files served from public/
-    // Without this, Turbopack tries to serve ort-wasm-simd-threaded.mjs from
-    // /_next/static/chunks/ which 404s.
+    onSpeechStart: () => { log('speech start detected'); },
     baseAssetPath: '/',
     onnxWASMBasePath: '/',
   });
 
-  // Track whether VAD errored so we can show hold-to-speak fallback
   useEffect(() => {
     if (vad.errored) {
       log('VAD errored — switching to hold-to-speak');
@@ -572,24 +591,15 @@ export default function VoiceChat() {
     }
   }, [vad.errored, log]);
 
-  // ── Shared session start ──────────────────────────────────────────────────
-
-  const startSession = useCallback(() => {
-    const initial: Message[] = [{ role: 'user', content: 'Start the review session.' }];
-    // Reset timestamps for fresh session
-    msgTimestampsRef.current = [Date.now()];
-    setMessages(initial);
-    sendMessages(initial);
-  }, [sendMessages]);
-
-  // ── iOS AudioContext unlock + first message ───────────────────────────────
+  // ── Entry points ──────────────────────────────────────────────────────────
 
   const handleTap = useCallback(async () => {
     if (voiceState !== 'idle') return;
     log('tap → unlocked');
     setVoiceStateLogged('unlocked');
+    setSessionStarted(true);
 
-    // Step 1: Unlock iOS Audio
+    // Unlock iOS Audio
     try {
       const ctx = new AudioContext();
       await ctx.resume();
@@ -598,11 +608,9 @@ export default function VoiceChat() {
       source.buffer = buffer;
       source.connect(ctx.destination);
       source.start(0);
-    } catch {
-      // Non-fatal — some browsers don't require this
-    }
+    } catch { /* Non-fatal */ }
 
-    // Step 2: Start VAD (may fail on iOS — fallback handles it)
+    // Start VAD
     try {
       await vad.start();
       vadActiveRef.current = true;
@@ -611,23 +619,22 @@ export default function VoiceChat() {
       const message = err instanceof Error ? err.message : String(err);
       log(`VAD start failed: ${message}`);
       vadActiveRef.current = false;
-      log('holdToSpeak = true');
       setHoldToSpeak(true);
     }
 
-    // Step 3: Send initial message to kick off the session
-    startSession();
-  }, [voiceState, vad, startSession, setVoiceStateLogged, log]);
+    // Load session data
+    await loadSession();
+  }, [voiceState, vad, loadSession, setVoiceStateLogged, log]);
 
-  // ── Type-instead entry point (skips all audio/mic) ───────────────────────
-
-  const handleTypeInstead = useCallback(() => {
+  const handleTypeInstead = useCallback(async () => {
     if (voiceState !== 'idle') return;
     log('type instead → unlocked (no audio)');
     setVoiceStateLogged('unlocked');
-    // Do NOT call startSession() — the user will type their first message
-    // themselves. sendMessages() will handle context from there.
-  }, [voiceState, setVoiceStateLogged, log]);
+    setSessionStarted(true);
+
+    // Load session data — projects + first task
+    await loadSession();
+  }, [voiceState, loadSession, setVoiceStateLogged, log]);
 
   // ── Pause/restart VAD around TTS ─────────────────────────────────────────
 
@@ -639,16 +646,11 @@ export default function VoiceChat() {
     }
   }, [voiceState, vad]);
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  // ── Render ────────────────────────────────────────────────────────────────
 
-  // Messages visible in the chat list (hide the initial session-start message)
-  const visibleMessages = messages.filter(
-    (m, i) => !(i === 0 && m.role === 'user' && m.content === 'Start the review session.')
-  );
+  const isSendDisabled = voiceState === 'processing' || voiceState === 'speaking' || sessionDone;
 
-  // Build a combined chat item list for rendering: real messages + debug bubbles, by arrival order.
-  // Messages are assigned timestamps at push time (stored in msgTimestampsRef).
-  // Debug messages carry their own timestamp. We merge-sort both lists by timestamp.
+  // Build combined chat item list
   type ChatItem =
     | { kind: 'message'; msg: Message; key: string }
     | { kind: 'debug'; dbg: DebugMessage; key: string };
@@ -657,18 +659,14 @@ export default function VoiceChat() {
   {
     let msgIdx = 0;
     let dbgIdx = 0;
-    while (msgIdx < visibleMessages.length || dbgIdx < debugMessages.length) {
-      // Map visibleMessages back to their original index in messages[] to look up timestamp
-      const origMsgIdx = msgIdx < visibleMessages.length
-        ? messages.indexOf(visibleMessages[msgIdx])
-        : -1;
-      const msgTs = origMsgIdx >= 0
-        ? (msgTimestampsRef.current[origMsgIdx] ?? Infinity)
+    while (msgIdx < messages.length || dbgIdx < debugMessages.length) {
+      const msgTs = msgIdx < messages.length
+        ? (msgTimestampsRef.current[msgIdx] ?? Infinity)
         : Infinity;
       const dbgTs = dbgIdx < debugMessages.length ? debugMessages[dbgIdx].timestamp : Infinity;
 
       if (msgTs <= dbgTs) {
-        chatItems.push({ kind: 'message', msg: visibleMessages[msgIdx], key: `msg-${msgIdx}` });
+        chatItems.push({ kind: 'message', msg: messages[msgIdx], key: `msg-${msgIdx}` });
         msgIdx++;
       } else {
         chatItems.push({ kind: 'debug', dbg: debugMessages[dbgIdx], key: debugMessages[dbgIdx].id });
@@ -677,18 +675,14 @@ export default function VoiceChat() {
     }
   }
 
-  // Controls disabled for Done/Skip/Send button — but NOT for the text input itself.
-  // The text input stays enabled always so the user can pre-type while AI responds.
-  // Also disabled once the session is empty (all caught up).
-  const isSendDisabled = voiceState === 'processing' || voiceState === 'speaking' || isSessionEmpty;
-
   // ── Idle screen ──
+
   if (voiceState === 'idle') {
     return (
       <>
         <div className="flex flex-col items-center justify-center min-h-screen bg-gray-950 px-6">
           <p className="text-gray-400 text-sm tracking-wide uppercase mb-10 font-medium">
-            Notion Voice Chat
+            Notion Task Review
           </p>
 
           <button
@@ -696,11 +690,8 @@ export default function VoiceChat() {
             aria-label="Tap to begin voice session"
             className="relative flex items-center justify-center w-32 h-32 rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
           >
-            {/* Pulsing outer ring */}
             <span className="absolute inset-0 rounded-full bg-white opacity-10 animate-ping" />
-            {/* Solid circle */}
             <span className="relative flex items-center justify-center w-32 h-32 rounded-full bg-white">
-              {/* Mic icon */}
               <svg
                 xmlns="http://www.w3.org/2000/svg"
                 className="w-10 h-10 text-gray-950"
@@ -710,16 +701,8 @@ export default function VoiceChat() {
                 strokeWidth={1.8}
                 aria-hidden="true"
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M12 1a4 4 0 014 4v6a4 4 0 01-8 0V5a4 4 0 014-4z"
-                />
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M19 11a7 7 0 01-14 0M12 19v4M8 23h8"
-                />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 1a4 4 0 014 4v6a4 4 0 01-8 0V5a4 4 0 014-4z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-14 0M12 19v4M8 23h8" />
               </svg>
             </span>
           </button>
@@ -750,25 +733,24 @@ export default function VoiceChat() {
     );
   }
 
-  // ── Active screen (unlocked / listening / processing / speaking) ──
+  // ── Active screen ──
+
   return (
     <>
       <div className={`relative flex flex-col min-h-screen bg-gray-950 px-4 py-8 gap-4${debugMode ? ' pb-80' : ''}`}>
-        {/* TTS mute toggle — top-right corner */}
+        {/* TTS mute toggle */}
         <button
           onClick={toggleTts}
           aria-label={ttsEnabled ? 'Mute text-to-speech' : 'Unmute text-to-speech'}
           className="absolute top-4 right-4 p-1.5 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
         >
           {ttsEnabled ? (
-            /* Speaker with sound waves */
             <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="M11 5L6 9H3a1 1 0 00-1 1v4a1 1 0 001 1h3l5 4V5z" />
               <path strokeLinecap="round" strokeLinejoin="round" d="M15.54 8.46a5 5 0 010 7.07" />
               <path strokeLinecap="round" strokeLinejoin="round" d="M19.07 4.93a10 10 0 010 14.14" />
             </svg>
           ) : (
-            /* Speaker with X */
             <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="M11 5L6 9H3a1 1 0 00-1 1v4a1 1 0 001 1h3l5 4V5z" />
               <path strokeLinecap="round" strokeLinejoin="round" d="M17 14l4-4m0 4l-4-4" />
@@ -776,24 +758,28 @@ export default function VoiceChat() {
           )}
         </button>
 
-        {/* Top: task card */}
+        {/* Task card */}
         <div className="flex justify-center">
-          {currentTask ? (
+          {sessionStarted && !sessionDone && currentTask === null ? (
+            // Loading skeleton
+            <div className="w-full max-w-lg h-36 rounded-2xl bg-gray-900 border border-gray-800 animate-pulse" />
+          ) : currentTask ? (
             <TaskCard
               title={currentTask.title}
               priority={currentTask.priority}
-              date={currentTask.date}
+              date={currentTask.dateToWorkOn}
+              status={currentTask.status}
+              effort={currentTask.effort}
+              projectName={currentTask.projectName}
               description={currentTask.description}
             />
-          ) : (
-            <div className="w-full max-w-lg h-28 rounded-2xl bg-gray-900 border border-gray-800 animate-pulse" />
-          )}
+          ) : null}
         </div>
 
-        {/* Empty state prompt — shown when no messages yet (text-mode entry) */}
-        {messages.length === 0 && (
+        {/* Empty state prompt — text mode only, no messages yet */}
+        {messages.length === 0 && !sessionStarted && (
           <p className="text-gray-600 text-sm text-center mt-8">
-            Ask about your tasks to get started
+            Loading your tasks...
           </p>
         )}
 
@@ -810,10 +796,7 @@ export default function VoiceChat() {
               if (item.kind === 'message') {
                 const msg = item.msg;
                 return (
-                  <div
-                    key={item.key}
-                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                  >
+                  <div key={item.key} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                     <div
                       className={`max-w-[80%] px-3 py-2 rounded-2xl text-sm leading-relaxed ${
                         msg.role === 'user'
@@ -821,12 +804,11 @@ export default function VoiceChat() {
                           : 'bg-gray-800 text-gray-100 rounded-bl-sm'
                       }`}
                     >
-                      {msg.content}
+                      {msg.role === 'assistant' ? renderMarkdown(msg.content) : msg.content}
                     </div>
                   </div>
                 );
               }
-              // Debug bubble — only shown when debugMode is on
               if (!debugMode) return null;
               return (
                 <div key={item.key} className="flex justify-start">
@@ -836,7 +818,6 @@ export default function VoiceChat() {
                 </div>
               );
             })}
-            {/* Streaming assistant response as a live bubble */}
             {responseText && (
               <div className="flex justify-start">
                 <div className="max-w-[80%] px-3 py-2 rounded-2xl rounded-bl-sm text-sm leading-relaxed bg-gray-800 text-gray-100 italic opacity-80">
@@ -847,9 +828,8 @@ export default function VoiceChat() {
           </div>
         )}
 
-        {/* Bottom: status + controls */}
+        {/* Bottom controls */}
         <div className="flex flex-col items-center gap-4 mt-auto">
-          {/* Transcript flash overlay */}
           {transcriptFlash && (
             <div
               className="px-4 py-2 rounded-xl bg-gray-800/90 text-gray-200 text-sm text-center max-w-xs animate-fade-in"
@@ -862,26 +842,6 @@ export default function VoiceChat() {
 
           <StatusIndicator state={voiceState} />
 
-          {/* Done + Skip buttons */}
-          <div className="flex gap-4">
-            <button
-              onClick={handleDone}
-              disabled={isSendDisabled}
-              className="px-5 py-2.5 rounded-xl bg-green-700 hover:bg-green-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
-              aria-label="Mark task as done"
-            >
-              Done
-            </button>
-            <button
-              onClick={handleSkip}
-              disabled={isSendDisabled}
-              className="px-5 py-2.5 rounded-xl bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
-              aria-label="Skip task to tomorrow"
-            >
-              Skip
-            </button>
-          </div>
-
           {/* Text input bar */}
           <div className="flex w-full max-w-lg gap-2">
             <input
@@ -889,8 +849,9 @@ export default function VoiceChat() {
               value={textInput}
               onChange={(e) => setTextInput(e.target.value)}
               onKeyDown={handleTextKeyDown}
-              placeholder="Type a message…"
-              className="flex-1 px-4 py-2.5 rounded-xl bg-gray-800 border border-gray-700 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-gray-500 transition-colors"
+              placeholder={sessionDone ? 'Session complete' : 'Type a message...'}
+              disabled={sessionDone}
+              className="flex-1 px-4 py-2.5 rounded-xl bg-gray-800 border border-gray-700 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-gray-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               aria-label="Type a message"
             />
             <button
@@ -903,8 +864,8 @@ export default function VoiceChat() {
             </button>
           </div>
 
-          {/* Hold-to-speak fallback (shown when VAD unavailable) */}
-          {holdToSpeak && (
+          {/* Hold-to-speak fallback */}
+          {holdToSpeak && !sessionDone && (
             <button
               onPointerDown={startHoldRecord}
               onPointerUp={stopHoldRecord}
@@ -912,25 +873,9 @@ export default function VoiceChat() {
               className="flex items-center gap-2 px-5 py-3 rounded-xl bg-gray-800 border border-gray-700 text-gray-300 text-sm select-none active:bg-gray-700 transition-colors"
               aria-label="Hold to speak"
             >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="w-4 h-4"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={1.8}
-                aria-hidden="true"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M12 1a4 4 0 014 4v6a4 4 0 01-8 0V5a4 4 0 014-4z"
-                />
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M19 11a7 7 0 01-14 0M12 19v4M8 23h8"
-                />
+              <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 1a4 4 0 014 4v6a4 4 0 01-8 0V5a4 4 0 014-4z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-14 0M12 19v4M8 23h8" />
               </svg>
               Hold to speak
             </button>
@@ -938,7 +883,6 @@ export default function VoiceChat() {
         </div>
       </div>
 
-      {/* Debug panel — fixed overlay, zero production impact */}
       <DebugPanel
         debugMode={debugMode}
         voiceState={voiceState}

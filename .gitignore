@@ -45,5 +45,7 @@ next-env.d.ts
 # test artifacts
 test-audio.wav
 scripts/gen-test-wav.js
+scripts/introspect-notion.js
+scripts/verify-ui.js
 test-results/
 verify-screenshot.png
