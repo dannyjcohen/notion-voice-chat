@@ -13,5 +13,5 @@ export const openrouter = createOpenRouter({
 // which requires more credits than a modest balance can cover and returns a 402.
 export const model = openrouter(
   process.env.AI_MODEL ?? 'anthropic/claude-sonnet-4-5',
-  { maxTokens: 1500 }
+  { maxTokens: 800 }
 );
