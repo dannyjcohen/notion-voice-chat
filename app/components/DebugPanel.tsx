@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import type { DebugEvent, ApiCall } from '@/hooks/useDebugLog';
 
-type VoiceState = 'idle' | 'unlocked' | 'listening' | 'processing' | 'speaking' | 'empty';
+type VoiceState = 'idle' | 'unlocked' | 'listening' | 'processing' | 'speaking';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -30,7 +30,6 @@ const STATE_COLORS: Record<VoiceState, string> = {
   listening: 'bg-green-600 text-white',
   processing: 'bg-yellow-500 text-gray-900',
   speaking: 'bg-purple-600 text-white',
-  empty: 'bg-teal-600 text-white',
 };
 
 function statusColor(status: number | 'pending'): string {

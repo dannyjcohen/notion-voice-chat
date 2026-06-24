@@ -178,11 +178,17 @@ test('empty state renders when AI signals no tasks remain', async ({ page }) => 
   await tapButton.click();
   await expect(tapButton).not.toBeVisible({ timeout: 5000 });
 
-  // Wait for empty state — heading "All caught up!" should appear
-  await expect(page.getByRole('heading', { name: /all caught up/i })).toBeVisible({
-    timeout: 10000,
-  });
-  await expect(page.getByText(/no more tasks to review/i)).toBeVisible();
+  // Wait for empty state — an inline "All caught up" message should appear in the chat list
+  // (no longer a full-screen overlay; it's now a regular assistant bubble)
+  await expect(
+    page.locator('[aria-label="Conversation history"]').getByText(/all caught up/i)
+  ).toBeVisible({ timeout: 10000 });
+
+  // The conversation history should still be visible (not replaced by a full-screen overlay)
+  await expect(page.locator('[aria-label="Conversation history"]')).toBeVisible();
+
+  // No full-screen "All caught up!" heading (h2) should exist
+  await expect(page.getByRole('heading', { name: /all caught up/i })).not.toBeVisible();
 
   expect(jsErrors).toHaveLength(0);
 });

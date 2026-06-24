@@ -1,4 +1,4 @@
-type VoiceState = 'idle' | 'unlocked' | 'listening' | 'processing' | 'speaking' | 'empty';
+type VoiceState = 'idle' | 'unlocked' | 'listening' | 'processing' | 'speaking';
 
 interface StatusIndicatorProps {
   state: VoiceState;

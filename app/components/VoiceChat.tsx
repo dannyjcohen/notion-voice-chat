@@ -10,7 +10,7 @@ import { useDebugLog } from '@/hooks/useDebugLog';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-type VoiceState = 'idle' | 'unlocked' | 'listening' | 'processing' | 'speaking' | 'empty';
+type VoiceState = 'idle' | 'unlocked' | 'listening' | 'processing' | 'speaking';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -22,6 +22,12 @@ interface CurrentTask {
   priority: string | null;
   date: string | null;
   description: string | null;
+}
+
+interface DebugMessage {
+  id: string;
+  timestamp: number;
+  content: string;
 }
 
 // ── Tool event line pattern ────────────────────────────────────────────────
@@ -107,6 +113,29 @@ export default function VoiceChat() {
   const [currentTask, setCurrentTask] = useState<CurrentTask | null>(null);
   const [holdToSpeak, setHoldToSpeak] = useState(false);
 
+  // Debug messages — rendered inline in the chat list as distinct bubbles
+  const [debugMessages, setDebugMessages] = useState<DebugMessage[]>([]);
+  const debugMsgCounterRef = useRef(0);
+
+  // Whether the session has reached the empty/caught-up state
+  const [isSessionEmpty, setIsSessionEmpty] = useState(false);
+
+  // Per-message push timestamps so debug bubbles can be interleaved by arrival time
+  const msgTimestampsRef = useRef<number[]>([]);
+
+  // Helper: push one or more messages and record their push timestamps
+  const pushMessages = useCallback((newMsgs: Message[]) => {
+    const now = Date.now();
+    setMessages((prev) => {
+      const next = [...prev, ...newMsgs];
+      // Record a timestamp for each new message
+      for (let i = prev.length; i < next.length; i++) {
+        msgTimestampsRef.current[i] = now;
+      }
+      return next;
+    });
+  }, []);
+
   // TTS enabled preference (persisted to localStorage)
   const [ttsEnabled, setTtsEnabled] = useState<boolean>(() => {
     if (typeof window === 'undefined') return true;
@@ -160,12 +189,18 @@ export default function VoiceChat() {
     [log]
   );
 
+  // Helper: add a debug bubble into the chat list (only when debugMode is on)
+  const addDebugMessage = useCallback((content: string) => {
+    const id = `debug-${Date.now()}-${debugMsgCounterRef.current++}`;
+    setDebugMessages((prev) => [...prev, { id, timestamp: Date.now(), content }]);
+  }, []);
+
   // Auto-scroll chat list to bottom on new messages
   useEffect(() => {
     if (chatListRef.current) {
       chatListRef.current.scrollTop = chatListRef.current.scrollHeight;
     }
-  }, [messages, responseText]);
+  }, [messages, responseText, debugMessages]);
 
   // Show a transcript flash briefly, then clear
   const showTranscriptFlash = useCallback((text: string) => {
@@ -245,7 +280,11 @@ export default function VoiceChat() {
         } catch {
           // ignore
         }
+        const durationS = ((Date.now() - startTime) / 1000).toFixed(1);
         logApiEnd('/api/chat', response.status, startTime, errorPreview);
+        if (debugMode) {
+          addDebugMessage(`📡 /api/chat  ${response.status}  ${durationS}s\n   msgs sent: ${msgs.length}  |  tokens est: ~${Math.round(msgs.reduce((sum, m) => sum + m.content.length, 0) / 4)}`);
+        }
 
         // Show user-visible error for non-ok responses
         setResponseText(
@@ -268,20 +307,52 @@ export default function VoiceChat() {
         const chunk = decoder.decode(value, { stream: true });
         const { cleaned, toolEvents, errorMessages } = extractToolLines(chunk);
 
-        // Log any tool events to debug panel
+        // Log any tool events to debug panel and inject debug bubbles
         for (const event of toolEvents) {
           log(event);
+          if (debugMode) {
+            const toolCallMatch = event.match(/^\[TOOL:([^:]+):(.+)\]$/);
+            const toolResultMatch = event.match(/^\[TOOL_RESULT:([^:]+):(.+)\]$/);
+            if (toolCallMatch) {
+              const [, name, rawArgs] = toolCallMatch;
+              let prettyArgs: string;
+              try {
+                prettyArgs = JSON.stringify(JSON.parse(rawArgs), null, 2);
+              } catch {
+                prettyArgs = rawArgs;
+              }
+              addDebugMessage(`🔧 ${name} called\n   args: ${prettyArgs}`);
+            } else if (toolResultMatch) {
+              const [, name, rawResult] = toolResultMatch;
+              let prettyResult: string;
+              try {
+                prettyResult = JSON.stringify(JSON.parse(rawResult), null, 2);
+              } catch {
+                prettyResult = rawResult;
+              }
+              const truncated = prettyResult.length > 800 ? prettyResult.slice(0, 800) + '…' : prettyResult;
+              addDebugMessage(`↩ ${name} result\n   ${truncated}`);
+            }
+          }
         }
 
         // Surface API errors to debug log and as a user-visible message
         for (const errMsg of errorMessages) {
           log(`[ERROR] ${errMsg}`);
+          if (debugMode) {
+            addDebugMessage(`⚠ Error: ${errMsg}`);
+          }
           if (!fullText) {
             // Only show error UI if we haven't received any text yet
             setResponseText(`Error: ${errMsg}`);
             setTimeout(() => setResponseText(''), 5000);
             setVoiceStateLogged('unlocked');
             logApiEnd('/api/chat', 0, startTime, errMsg);
+            if (debugMode) {
+              const durationS = ((Date.now() - startTime) / 1000).toFixed(1);
+              const tokenEst = Math.round(msgs.reduce((sum, m) => sum + m.content.length, 0) / 4);
+              addDebugMessage(`📡 /api/chat  0  ${durationS}s\n   msgs sent: ${msgs.length}  |  tokens est: ~${tokenEst}`);
+            }
             reader.cancel();
             return;
           }
@@ -317,15 +388,23 @@ export default function VoiceChat() {
         }
       }
 
+      const durationS = ((Date.now() - startTime) / 1000).toFixed(1);
       logApiEnd('/api/chat', response.status, startTime, fullText.slice(0, 200));
 
+      // Inject API call summary debug bubble
+      if (debugMode) {
+        const tokenEst = Math.round(msgs.reduce((sum, m) => sum + m.content.length, 0) / 4);
+        addDebugMessage(`📡 /api/chat  ${response.status}  ${durationS}s\n   msgs sent: ${msgs.length}  |  tokens est: ~${tokenEst}`);
+      }
+
       // Update messages with assistant response
-      setMessages((prev) => [...prev, { role: 'assistant', content: fullText }]);
+      pushMessages([{ role: 'assistant', content: fullText }]);
       setResponseText('');
 
-      // Detect empty state
+      // Detect empty state — instead of full-screen overlay, add inline message and disable input
       if (detectEmpty(fullText)) {
-        setVoiceStateLogged('empty');
+        pushMessages([{ role: 'assistant', content: '✅ All caught up — no more tasks to review.' }]);
+        setIsSessionEmpty(true);
         return;
       }
 
@@ -335,7 +414,7 @@ export default function VoiceChat() {
       logApiEnd('/api/chat', 0, startTime, message);
       setVoiceStateLogged('unlocked');
     }
-  }, [drainTtsQueue, setVoiceStateLogged, log, logApiStart, logApiEnd]);
+  }, [drainTtsQueue, setVoiceStateLogged, log, logApiStart, logApiEnd, debugMode, addDebugMessage, pushMessages]);
 
   // ── Text input submit ─────────────────────────────────────────────────────
 
@@ -347,9 +426,9 @@ export default function VoiceChat() {
     setTextInput('');
     const newMessage: Message = { role: 'user', content: text };
     const updated = [...messages, newMessage];
-    setMessages(updated);
+    pushMessages([newMessage]);
     sendMessages(updated);
-  }, [textInput, voiceState, messages, sendMessages]);
+  }, [textInput, voiceState, messages, sendMessages, pushMessages]);
 
   const handleTextKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -366,16 +445,16 @@ export default function VoiceChat() {
   const handleDone = useCallback(() => {
     const newMessage: Message = { role: 'user', content: 'Mark this task as done.' };
     const updated = [...messages, newMessage];
-    setMessages(updated);
+    pushMessages([newMessage]);
     sendMessages(updated);
-  }, [messages, sendMessages]);
+  }, [messages, sendMessages, pushMessages]);
 
   const handleSkip = useCallback(() => {
     const newMessage: Message = { role: 'user', content: 'Skip this task to tomorrow.' };
     const updated = [...messages, newMessage];
-    setMessages(updated);
+    pushMessages([newMessage]);
     sendMessages(updated);
-  }, [messages, sendMessages]);
+  }, [messages, sendMessages, pushMessages]);
 
   // ── Hold-to-speak recording ────────────────────────────────────────────────
 
@@ -402,10 +481,11 @@ export default function VoiceChat() {
           logApiEnd('/api/transcribe', res.status, tStartTime, data.transcript);
           const transcript: string = data.transcript ?? '';
           if (transcript.trim()) {
+            if (debugMode) addDebugMessage(`🎤 Transcribed: "${transcript}"`);
             showTranscriptFlash(transcript);
             const newMessage: Message = { role: 'user', content: transcript };
             const updated = [...messages, newMessage];
-            setMessages(updated);
+            pushMessages([newMessage]);
             sendMessages(updated);
           } else {
             setVoiceStateLogged('unlocked');
@@ -425,7 +505,7 @@ export default function VoiceChat() {
       log(`hold-to-speak mic error: ${message}`);
       // Mic permission denied — stay unlocked
     }
-  }, [messages, sendMessages, setVoiceStateLogged, log, logApiStart, logApiEnd, showTranscriptFlash]);
+  }, [messages, sendMessages, setVoiceStateLogged, log, logApiStart, logApiEnd, showTranscriptFlash, debugMode, addDebugMessage, pushMessages]);
 
   const stopHoldRecord = useCallback(() => {
     mediaRecorderRef.current?.stop();
@@ -449,10 +529,11 @@ export default function VoiceChat() {
         logApiEnd('/api/transcribe', res.status, tStartTime, data.transcript);
         const transcript: string = data.transcript ?? '';
         if (transcript.trim()) {
+          if (debugMode) addDebugMessage(`🎤 Transcribed: "${transcript}"`);
           showTranscriptFlash(transcript);
           const newMessage: Message = { role: 'user', content: transcript };
           const updated = [...messages, newMessage];
-          setMessages(updated);
+          pushMessages([newMessage]);
           sendMessages(updated);
         } else {
           setVoiceStateLogged('listening');
@@ -464,7 +545,7 @@ export default function VoiceChat() {
         setVoiceStateLogged('listening');
       }
     },
-    [messages, sendMessages, setVoiceStateLogged, log, logApiStart, logApiEnd, showTranscriptFlash]
+    [messages, sendMessages, setVoiceStateLogged, log, logApiStart, logApiEnd, showTranscriptFlash, debugMode, addDebugMessage, pushMessages]
   );
 
   // ── VAD hook ──────────────────────────────────────────────────────────────
@@ -495,6 +576,8 @@ export default function VoiceChat() {
 
   const startSession = useCallback(() => {
     const initial: Message[] = [{ role: 'user', content: 'Start the review session.' }];
+    // Reset timestamps for fresh session
+    msgTimestampsRef.current = [Date.now()];
     setMessages(initial);
     sendMessages(initial);
   }, [sendMessages]);
@@ -563,9 +646,41 @@ export default function VoiceChat() {
     (m, i) => !(i === 0 && m.role === 'user' && m.content === 'Start the review session.')
   );
 
+  // Build a combined chat item list for rendering: real messages + debug bubbles, by arrival order.
+  // Messages are assigned timestamps at push time (stored in msgTimestampsRef).
+  // Debug messages carry their own timestamp. We merge-sort both lists by timestamp.
+  type ChatItem =
+    | { kind: 'message'; msg: Message; key: string }
+    | { kind: 'debug'; dbg: DebugMessage; key: string };
+
+  const chatItems: ChatItem[] = [];
+  {
+    let msgIdx = 0;
+    let dbgIdx = 0;
+    while (msgIdx < visibleMessages.length || dbgIdx < debugMessages.length) {
+      // Map visibleMessages back to their original index in messages[] to look up timestamp
+      const origMsgIdx = msgIdx < visibleMessages.length
+        ? messages.indexOf(visibleMessages[msgIdx])
+        : -1;
+      const msgTs = origMsgIdx >= 0
+        ? (msgTimestampsRef.current[origMsgIdx] ?? Infinity)
+        : Infinity;
+      const dbgTs = dbgIdx < debugMessages.length ? debugMessages[dbgIdx].timestamp : Infinity;
+
+      if (msgTs <= dbgTs) {
+        chatItems.push({ kind: 'message', msg: visibleMessages[msgIdx], key: `msg-${msgIdx}` });
+        msgIdx++;
+      } else {
+        chatItems.push({ kind: 'debug', dbg: debugMessages[dbgIdx], key: debugMessages[dbgIdx].id });
+        dbgIdx++;
+      }
+    }
+  }
+
   // Controls disabled for Done/Skip/Send button — but NOT for the text input itself.
   // The text input stays enabled always so the user can pre-type while AI responds.
-  const isSendDisabled = voiceState === 'processing' || voiceState === 'speaking';
+  // Also disabled once the session is empty (all caught up).
+  const isSendDisabled = voiceState === 'processing' || voiceState === 'speaking' || isSessionEmpty;
 
   // ── Idle screen ──
   if (voiceState === 'idle') {
@@ -635,43 +750,6 @@ export default function VoiceChat() {
     );
   }
 
-  // ── Empty state ──
-  if (voiceState === 'empty') {
-    return (
-      <>
-        <div className="flex flex-col items-center justify-center min-h-screen bg-gray-950 px-6 gap-4">
-          <div className="flex items-center justify-center w-20 h-20 rounded-full bg-green-600">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              className="w-10 h-10 text-white"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2.5}
-              aria-hidden="true"
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-            </svg>
-          </div>
-          <h2 className="text-2xl font-semibold text-white">All caught up!</h2>
-          <p className="text-gray-400 text-sm">No more tasks to review.</p>
-        </div>
-
-        <DebugPanel
-          debugMode={debugMode}
-          voiceState={voiceState}
-          vadErrored={!!vad.errored}
-          vadListening={vad.listening}
-          holdToSpeak={holdToSpeak}
-          messageCount={messages.length}
-          events={events}
-          lastApiCall={lastApiCall}
-          lastPayload={lastPayloadRef.current}
-        />
-      </>
-    );
-  }
-
   // ── Active screen (unlocked / listening / processing / speaking) ──
   return (
     <>
@@ -720,7 +798,7 @@ export default function VoiceChat() {
         )}
 
         {/* Conversation history */}
-        {(visibleMessages.length > 0 || responseText) && (
+        {(chatItems.length > 0 || responseText) && (
           <div
             ref={chatListRef}
             className="w-full max-w-lg mx-auto flex flex-col gap-2 overflow-y-auto"
@@ -728,22 +806,36 @@ export default function VoiceChat() {
             aria-label="Conversation history"
             aria-live="polite"
           >
-            {visibleMessages.map((msg, i) => (
-              <div
-                key={i}
-                className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-              >
-                <div
-                  className={`max-w-[80%] px-3 py-2 rounded-2xl text-sm leading-relaxed ${
-                    msg.role === 'user'
-                      ? 'bg-gray-600 text-white rounded-br-sm'
-                      : 'bg-gray-800 text-gray-100 rounded-bl-sm'
-                  }`}
-                >
-                  {msg.content}
+            {chatItems.map((item) => {
+              if (item.kind === 'message') {
+                const msg = item.msg;
+                return (
+                  <div
+                    key={item.key}
+                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div
+                      className={`max-w-[80%] px-3 py-2 rounded-2xl text-sm leading-relaxed ${
+                        msg.role === 'user'
+                          ? 'bg-gray-600 text-white rounded-br-sm'
+                          : 'bg-gray-800 text-gray-100 rounded-bl-sm'
+                      }`}
+                    >
+                      {msg.content}
+                    </div>
+                  </div>
+                );
+              }
+              // Debug bubble — only shown when debugMode is on
+              if (!debugMode) return null;
+              return (
+                <div key={item.key} className="flex justify-start">
+                  <pre className="bg-teal-950 border border-teal-800 text-teal-300 font-mono text-xs rounded-lg px-3 py-2 w-full whitespace-pre-wrap break-all">
+                    {item.dbg.content}
+                  </pre>
                 </div>
-              </div>
-            ))}
+              );
+            })}
             {/* Streaming assistant response as a live bubble */}
             {responseText && (
               <div className="flex justify-start">
