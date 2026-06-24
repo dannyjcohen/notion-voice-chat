@@ -16,7 +16,7 @@ import {
 // tool-result: result   → output
 
 type StreamPart =
-  | { type: 'text-delta'; text: string }
+  | { type: 'text-delta'; text: string | undefined }
   | { type: 'tool-call'; toolName: string; input: unknown }
   | { type: 'tool-result'; toolName: string; output: unknown }
   | { type: 'error'; error: unknown }
@@ -133,7 +133,7 @@ export async function POST(request: Request) {
           for await (const part of result.fullStream as AsyncIterable<StreamPart>) {
             if (part.type === 'text-delta') {
               // AI SDK v6: field is `text`, not `textDelta`
-              controller.enqueue(encoder.encode(part.text));
+              controller.enqueue(encoder.encode(typeof part.text === 'string' ? part.text : ''));
             } else if (part.type === 'tool-call') {
               // AI SDK v6: field is `input`, not `args`
               controller.enqueue(
