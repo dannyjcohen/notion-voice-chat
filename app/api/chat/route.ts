@@ -10,12 +10,17 @@ import {
 } from '@/lib/notion';
 
 // ── Types for tool events ──────────────────────────────────────────────────
+// AI SDK v6 renamed several fields on stream parts.
+// text-delta: textDelta → text
+// tool-call:  args      → input
+// tool-result: result   → output
 
 type StreamPart =
-  | { type: 'text-delta'; textDelta: string }
-  | { type: 'tool-call'; toolName: string; args: unknown }
-  | { type: 'tool-result'; toolName: string; result: unknown }
-  | { type: 'finish' | 'error' | 'step-start' | 'step-finish'; [key: string]: unknown };
+  | { type: 'text-delta'; text: string }
+  | { type: 'tool-call'; toolName: string; input: unknown }
+  | { type: 'tool-result'; toolName: string; output: unknown }
+  | { type: 'error'; error: unknown }
+  | { type: string; [key: string]: unknown };
 
 export const maxDuration = 30;
 
@@ -127,23 +132,37 @@ export async function POST(request: Request) {
         try {
           for await (const part of result.fullStream as AsyncIterable<StreamPart>) {
             if (part.type === 'text-delta') {
-              controller.enqueue(encoder.encode(part.textDelta));
+              // AI SDK v6: field is `text`, not `textDelta`
+              controller.enqueue(encoder.encode(part.text));
             } else if (part.type === 'tool-call') {
-              // Inject a tool call marker line (filtered out on the client side)
+              // AI SDK v6: field is `input`, not `args`
               controller.enqueue(
-                encoder.encode(`\n[TOOL:${part.toolName}:${JSON.stringify(part.args)}]\n`)
+                encoder.encode(`\n[TOOL:${part.toolName}:${JSON.stringify(part.input)}]\n`)
               );
             } else if (part.type === 'tool-result') {
-              // Inject a tool result marker line (filtered out on the client side)
-              const resultStr = JSON.stringify(part.result).slice(0, 500);
+              // AI SDK v6: field is `output`, not `result`
+              const resultStr = JSON.stringify(part.output).slice(0, 500);
               controller.enqueue(
                 encoder.encode(`\n[TOOL_RESULT:${part.toolName}:${resultStr}]\n`)
+              );
+            } else if (part.type === 'error') {
+              // Surface stream errors to the client so they appear in the debug panel
+              const errMsg = part.error instanceof Error
+                ? part.error.message
+                : String(part.error ?? 'Unknown error');
+              console.error('[chat] stream error part:', errMsg);
+              controller.enqueue(
+                encoder.encode(`\n[ERROR:${errMsg.slice(0, 300)}]\n`)
               );
             }
           }
         } catch (streamErr) {
           const message = streamErr instanceof Error ? streamErr.message : String(streamErr);
-          console.error('[chat] stream error:', message);
+          console.error('[chat] stream exception:', message);
+          // Send the error to the client so it's visible in the debug panel
+          controller.enqueue(
+            encoder.encode(`\n[ERROR:${message.slice(0, 300)}]\n`)
+          );
         } finally {
           controller.close();
         }

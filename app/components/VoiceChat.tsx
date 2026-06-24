@@ -27,25 +27,35 @@ interface CurrentTask {
 // ── Tool event line pattern ────────────────────────────────────────────────
 
 const TOOL_LINE_RE = /^\[TOOL(?:_RESULT)?:[^\]]+\]$/;
+const ERROR_LINE_RE = /^\[ERROR:([^\]]*)\]$/;
 
 function isToolLine(line: string): boolean {
   return TOOL_LINE_RE.test(line.trim());
 }
 
-// Strip [TOOL:...] and [TOOL_RESULT:...] lines from text, return cleaned text
-// and an array of extracted tool event strings.
-function extractToolLines(text: string): { cleaned: string; toolEvents: string[] } {
+function getErrorMessage(line: string): string | null {
+  const m = line.trim().match(ERROR_LINE_RE);
+  return m ? m[1] : null;
+}
+
+// Strip [TOOL:...], [TOOL_RESULT:...], and [ERROR:...] lines from text.
+// Returns cleaned text, extracted tool event strings, and any error messages.
+function extractToolLines(text: string): { cleaned: string; toolEvents: string[]; errorMessages: string[] } {
   const lines = text.split('\n');
   const toolEvents: string[] = [];
+  const errorMessages: string[] = [];
   const kept: string[] = [];
   for (const line of lines) {
-    if (isToolLine(line)) {
+    const errMsg = getErrorMessage(line);
+    if (errMsg !== null) {
+      errorMessages.push(errMsg);
+    } else if (isToolLine(line)) {
       toolEvents.push(line.trim());
     } else {
       kept.push(line);
     }
   }
-  return { cleaned: kept.join('\n'), toolEvents };
+  return { cleaned: kept.join('\n'), toolEvents, errorMessages };
 }
 
 // ── Empty-state detector ───────────────────────────────────────────────────
@@ -234,11 +244,25 @@ export default function VoiceChat() {
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        const { cleaned, toolEvents } = extractToolLines(chunk);
+        const { cleaned, toolEvents, errorMessages } = extractToolLines(chunk);
 
         // Log any tool events to debug panel
         for (const event of toolEvents) {
           log(event);
+        }
+
+        // Surface API errors to debug log and as a user-visible message
+        for (const errMsg of errorMessages) {
+          log(`[ERROR] ${errMsg}`);
+          if (!fullText) {
+            // Only show error UI if we haven't received any text yet
+            setResponseText(`Error: ${errMsg}`);
+            setTimeout(() => setResponseText(''), 5000);
+            setVoiceStateLogged('unlocked');
+            logApiEnd('/api/chat', 0, startTime, errMsg);
+            reader.cancel();
+            return;
+          }
         }
 
         fullText += cleaned;

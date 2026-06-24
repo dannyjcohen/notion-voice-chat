@@ -13,19 +13,21 @@ export interface NotionTask {
 }
 
 export async function getNextTask(): Promise<NotionTask | null> {
+  // AI Clean Up Status is a select property in this database (not a status property),
+  // so we use the `select` filter type, not `status`.
   const response = await notion.databases.query({
     database_id: DB_ID,
     filter: {
       or: [
         {
           property: 'AI Clean Up Status',
-          status: {
+          select: {
             does_not_equal: 'Completed',
           },
         },
         {
           property: 'AI Clean Up Status',
-          status: {
+          select: {
             is_empty: true,
           },
         },
@@ -58,8 +60,9 @@ export async function getNextTask(): Promise<NotionTask | null> {
   const priority: string | null =
     props['Priority']?.select?.name ?? null;
 
+  // AI Clean Up Status is a select property (not status type).
   const status: string | null =
-    props['AI Clean Up Status']?.status?.name ?? null;
+    props['AI Clean Up Status']?.select?.name ?? null;
 
   return {
     id: page.id,
@@ -72,13 +75,13 @@ export async function getNextTask(): Promise<NotionTask | null> {
 }
 
 export async function markTaskDone(taskId: string): Promise<void> {
+  // AI Clean Up Status is a select property, not a status property.
   await notion.pages.update({
     page_id: taskId,
     properties: {
       'AI Clean Up Status': {
-        status: {
-          name: 'Completed',
-        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        select: { name: 'Completed' } as any,
       },
     },
   });
