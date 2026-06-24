@@ -1,0 +1,185 @@
+'use client';
+
+import { useState } from 'react';
+import type { DebugEvent, ApiCall } from '@/hooks/useDebugLog';
+
+type VoiceState = 'idle' | 'unlocked' | 'listening' | 'processing' | 'speaking' | 'empty';
+
+interface DebugPanelProps {
+  debugMode: boolean;
+  voiceState: VoiceState;
+  vadErrored: boolean;
+  vadListening: boolean;
+  holdToSpeak: boolean;
+  messageCount: number;
+  events: DebugEvent[];
+  lastApiCall: ApiCall | null;
+}
+
+// ── Badge helpers ──────────────────────────────────────────────────────────
+
+const STATE_COLORS: Record<VoiceState, string> = {
+  idle: 'bg-gray-600 text-gray-100',
+  unlocked: 'bg-blue-600 text-white',
+  listening: 'bg-green-600 text-white',
+  processing: 'bg-yellow-500 text-gray-900',
+  speaking: 'bg-purple-600 text-white',
+  empty: 'bg-teal-600 text-white',
+};
+
+function statusColor(status: number | 'pending'): string {
+  if (status === 'pending') return 'text-gray-400';
+  if (status >= 200 && status < 300) return 'text-green-400';
+  if (status >= 400 && status < 500) return 'text-yellow-400';
+  if (status >= 500) return 'text-red-400';
+  return 'text-gray-400';
+}
+
+function formatApiCallLine(call: ApiCall): string {
+  const dur = call.duration !== undefined ? `   [${call.duration}s]` : '';
+  if (call.status === 'pending') {
+    return `POST ${call.endpoint} → pending...`;
+  }
+  const statusText = httpStatusText(call.status);
+  return `POST ${call.endpoint} → ${call.status} ${statusText}${dur}`;
+}
+
+function httpStatusText(status: number): string {
+  const map: Record<number, string> = {
+    200: 'OK',
+    201: 'Created',
+    400: 'Bad Request',
+    401: 'Unauthorized',
+    403: 'Forbidden',
+    404: 'Not Found',
+    422: 'Unprocessable Entity',
+    500: 'Internal Server Error',
+    503: 'Service Unavailable',
+  };
+  return map[status] ?? '';
+}
+
+// ── Main component ─────────────────────────────────────────────────────────
+
+export default function DebugPanel({
+  debugMode,
+  voiceState,
+  vadErrored,
+  vadListening,
+  holdToSpeak,
+  messageCount,
+  events,
+  lastApiCall,
+}: DebugPanelProps) {
+  const [responseExpanded, setResponseExpanded] = useState(false);
+
+  if (!debugMode) return null;
+
+  const has503 = lastApiCall !== null && lastApiCall.status === 503;
+
+  return (
+    <div
+      className="fixed bottom-0 left-0 right-0 z-50 bg-gray-900/95 border-t border-gray-700 text-xs font-mono"
+      style={{ maxHeight: '250px' }}
+      aria-label="Debug panel"
+    >
+      {/* Header label */}
+      <div className="px-3 py-1 border-b border-gray-700 flex items-center gap-2">
+        <span className="text-gray-500 uppercase tracking-widest text-[10px] font-semibold">
+          DEBUG
+        </span>
+      </div>
+
+      <div className="overflow-y-auto" style={{ maxHeight: '220px' }}>
+        {/* Row 1 — State badges */}
+        <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-gray-800">
+          {/* Voice State */}
+          <span
+            className={`px-2 py-0.5 rounded text-[11px] font-semibold uppercase ${STATE_COLORS[voiceState]}`}
+          >
+            {voiceState}
+          </span>
+
+          {/* VAD status */}
+          {vadErrored ? (
+            <span className="px-2 py-0.5 rounded bg-red-900 text-red-300 text-[11px]">
+              ✗ VAD errored
+            </span>
+          ) : vadListening ? (
+            <span className="px-2 py-0.5 rounded bg-green-900 text-green-300 text-[11px]">
+              ✓ VAD active
+            </span>
+          ) : (
+            <span className="px-2 py-0.5 rounded bg-gray-700 text-gray-400 text-[11px]">
+              — VAD not started
+            </span>
+          )}
+
+          {/* Hold-to-speak */}
+          {holdToSpeak ? (
+            <span className="px-2 py-0.5 rounded bg-orange-700 text-orange-100 text-[11px]">
+              hold-to-speak on
+            </span>
+          ) : (
+            <span className="px-2 py-0.5 rounded bg-gray-700 text-gray-400 text-[11px]">
+              hold-to-speak off
+            </span>
+          )}
+
+          {/* Message count */}
+          <span className="px-2 py-0.5 rounded bg-gray-700 text-gray-300 text-[11px]">
+            {messageCount} msgs
+          </span>
+        </div>
+
+        {/* Row 2 — Last API call */}
+        {lastApiCall && (
+          <div className={`px-3 py-1.5 border-b border-gray-800 ${statusColor(lastApiCall.status)}`}>
+            {formatApiCallLine(lastApiCall)}
+          </div>
+        )}
+
+        {/* Row 5 — 503 warning (shown above event log when relevant) */}
+        {has503 && (
+          <div className="px-3 py-1.5 border-b border-gray-800 bg-yellow-900/40 text-yellow-300">
+            ⚠ API returning 503 — env vars not configured. Create .env.local from .env.local.example
+          </div>
+        )}
+
+        {/* Row 3 — Event log */}
+        <div className="px-3 py-2 border-b border-gray-800">
+          {events.length === 0 ? (
+            <span className="text-gray-600">No events yet.</span>
+          ) : (
+            <div className="space-y-0.5">
+              {events.map((ev, i) => (
+                <div key={i} className="text-gray-300">
+                  <span className="text-gray-500 mr-2">{ev.time}</span>
+                  {ev.message}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Row 4 — Last API response (collapsible) */}
+        {lastApiCall?.responsePreview && (
+          <div className="px-3 py-2">
+            <button
+              onClick={() => setResponseExpanded((v) => !v)}
+              className="text-gray-400 hover:text-gray-200 transition-colors"
+              aria-expanded={responseExpanded}
+            >
+              Response {responseExpanded ? '▲' : '▼'}
+            </button>
+            {responseExpanded && (
+              <pre className="mt-1 text-gray-300 whitespace-pre-wrap break-all text-[11px] leading-relaxed">
+                {lastApiCall.responsePreview.slice(0, 500)}
+              </pre>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
