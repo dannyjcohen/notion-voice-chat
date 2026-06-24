@@ -26,8 +26,14 @@ interface Task {
   description: string | null;
   effort: string | null;
   aiCleanUpStatus: string | null;
+  aiAgentTakeCare: boolean;
   projectId: string | null;
   projectName: string | null;
+}
+
+interface PendingUpdate {
+  taskId: string;
+  fields: Record<string, unknown>;
 }
 
 interface Project {
@@ -120,6 +126,7 @@ export default function VoiceChat() {
   const [skipList, setSkipList] = useState<string[]>([]);
   const [sessionDone, setSessionDone] = useState(false);
   const [sessionStarted, setSessionStarted] = useState(false);
+  const [pendingUpdate, setPendingUpdate] = useState<PendingUpdate | null>(null);
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [responseText, setResponseText] = useState('');
@@ -241,8 +248,10 @@ export default function VoiceChat() {
   const fetchNextTask = useCallback(async (currentSkipList: string[]) => {
     const skipParam = currentSkipList.join(',');
     const url = `/api/tasks/next${skipParam ? `?skip=${encodeURIComponent(skipParam)}` : ''}`;
+    const startTime = logApiStart('/api/tasks/next');
     const res = await fetch(url);
     const data = await res.json() as { task: Task | null };
+    logApiEnd('/api/tasks/next', res.status, startTime);
     if (!data.task) {
       setSessionDone(true);
       addMessage('assistant', 'All caught up — no more tasks to review!');
@@ -250,16 +259,18 @@ export default function VoiceChat() {
     }
     setCurrentTask(data.task);
     addMessage('assistant', `Next task: **${data.task.title}**`);
-  }, [addMessage]);
+  }, [addMessage, logApiStart, logApiEnd]);
 
   // ── Handle AI response (JSON action or follow-up text) ───────────────────
 
   const currentTaskRef = useRef<Task | null>(null);
   const skipListRef = useRef<string[]>([]);
+  const pendingUpdateRef = useRef<PendingUpdate | null>(null);
 
   // Keep refs in sync with state
   useEffect(() => { currentTaskRef.current = currentTask; }, [currentTask]);
   useEffect(() => { skipListRef.current = skipList; }, [skipList]);
+  useEffect(() => { pendingUpdateRef.current = pendingUpdate; }, [pendingUpdate]);
 
   const handleAIResponse = useCallback(async (responseText: string) => {
     // Strip markdown code fences (```json ... ```) if present
@@ -274,20 +285,28 @@ export default function VoiceChat() {
     }
 
     try {
-      const action = JSON.parse(trimmed) as { action: string; fields?: Record<string, string> };
+      const action = JSON.parse(trimmed) as {
+        action: string;
+        fields?: Record<string, unknown>;
+        summary?: string;
+      };
       if (action.action === 'skip' && currentTaskRef.current) {
         const newSkipList = [...skipListRef.current, currentTaskRef.current.id];
         setSkipList(newSkipList);
         await fetchNextTask(newSkipList);
-      } else if (action.action === 'update' && action.fields && currentTaskRef.current) {
-        await fetch('/api/tasks/update', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ taskId: currentTaskRef.current.id, fields: action.fields }),
-        });
-        addMessage('assistant', 'Task updated! Pulling the next one...');
-        await fetchNextTask(skipListRef.current);
+      } else if (action.action === 'confirm' && action.fields && currentTaskRef.current) {
+        // Store pending update — user must confirm before anything touches Notion
+        setPendingUpdate({ taskId: currentTaskRef.current.id, fields: action.fields });
+        // Summary is shown as an assistant message bubble and spoken via TTS
+        if (action.summary) {
+          addMessage('assistant', action.summary);
+          // Queue summary for TTS (the JSON was suppressed from TTS above)
+          ttsQueueRef.current.push(action.summary);
+          if (!ttsDrainingRef.current) drainTtsQueue();
+        }
+        // The confirm/cancel buttons are rendered based on pendingUpdate state
       }
+      // Note: "update" action no longer handled here — always go through "confirm" first
     } catch {
       // Not JSON — it's a follow-up question, display it normally (already in messages)
     }
@@ -297,10 +316,14 @@ export default function VoiceChat() {
 
   const loadSession = useCallback(async () => {
     log('loadSession: fetching projects + first task');
+    const projectsStart = logApiStart('/api/projects');
+    const tasksStart = logApiStart('/api/tasks/next');
     const [projectsRes, taskRes] = await Promise.all([
       fetch('/api/projects'),
       fetch('/api/tasks/next'),
     ]);
+    logApiEnd('/api/projects', projectsRes.status, projectsStart);
+    logApiEnd('/api/tasks/next', taskRes.status, tasksStart);
 
     const projectsData = await projectsRes.json() as { projects: Project[] };
     const taskData = await taskRes.json() as { task: Task | null };
@@ -315,7 +338,36 @@ export default function VoiceChat() {
 
     setCurrentTask(taskData.task);
     addMessage('assistant', `Let's get started. First task: **${taskData.task.title}**`);
-  }, [log, addMessage]);
+  }, [log, addMessage, logApiStart, logApiEnd]);
+
+  // ── Confirm / cancel pending update ──────────────────────────────────────
+
+  const handleConfirmUpdate = useCallback(async () => {
+    const pending = pendingUpdateRef.current;
+    if (!pending) return;
+    setPendingUpdate(null);
+
+    const startTime = logApiStart('/api/tasks/update');
+    try {
+      const res = await fetch('/api/tasks/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskId: pending.taskId, fields: pending.fields }),
+      });
+      logApiEnd('/api/tasks/update', res.status, startTime);
+      addMessage('assistant', 'Task updated!');
+      await fetchNextTask(skipListRef.current);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logApiEnd('/api/tasks/update', 0, startTime, message);
+      addMessage('assistant', 'Update failed — please try again.');
+    }
+  }, [addMessage, fetchNextTask, logApiStart, logApiEnd]);
+
+  const handleCancelUpdate = useCallback(() => {
+    setPendingUpdate(null);
+    addMessage('assistant', "Okay, what would you like to change?");
+  }, [addMessage]);
 
   // ── Streaming chat send ───────────────────────────────────────────────────
 
@@ -405,27 +457,28 @@ export default function VoiceChat() {
 
         fullText += cleaned;
         sentenceBuffer += cleaned;
-        // Don't show JSON action responses in the live streaming preview
+        // Don't show or speak JSON action responses (confirm/skip/update)
         const looksLikeAction = fullText.trimStart().startsWith('{') || fullText.trimStart().startsWith('```');
         if (!looksLikeAction) {
           setResponseText(fullText);
-        }
 
-        const sentences = sentenceBuffer.match(/[^.!?]+[.!?]+/g) ?? [];
-        for (const s of sentences) {
-          const trimmed = s.trim();
-          if (trimmed && !isToolLine(trimmed)) {
-            ttsQueueRef.current.push(trimmed);
+          const sentences = sentenceBuffer.match(/[^.!?]+[.!?]+/g) ?? [];
+          for (const s of sentences) {
+            const trimmed = s.trim();
+            if (trimmed && !isToolLine(trimmed)) {
+              ttsQueueRef.current.push(trimmed);
+            }
           }
-        }
-        if (sentences.length > 0) {
-          sentenceBuffer = sentenceBuffer.replace(/[\s\S]*[.!?]+/, '');
-          if (!ttsDrainingRef.current) drainTtsQueue();
+          if (sentences.length > 0) {
+            sentenceBuffer = sentenceBuffer.replace(/[\s\S]*[.!?]+/, '');
+            if (!ttsDrainingRef.current) drainTtsQueue();
+          }
         }
       }
 
       const remaining = sentenceBuffer.trim();
-      if (remaining && !isToolLine(remaining)) {
+      const looksLikeActionFinal = fullText.trimStart().startsWith('{') || fullText.trimStart().startsWith('```');
+      if (remaining && !isToolLine(remaining) && !looksLikeActionFinal) {
         ttsQueueRef.current.push(remaining);
         if (!ttsDrainingRef.current) drainTtsQueue();
       }
@@ -469,9 +522,20 @@ export default function VoiceChat() {
     if (sessionDone) return;
 
     setTextInput('');
-    const newMessage: Message = { role: 'user', content: text };
+
+    // If there's a pending confirmation and user types a follow-up,
+    // clear the pending state and pass the pending fields as context
+    const pending = pendingUpdateRef.current;
+    let messageContent = text;
+    if (pending) {
+      setPendingUpdate(null);
+      messageContent = `[Revising pending update with fields: ${JSON.stringify(pending.fields)}] ${text}`;
+    }
+
+    const newMessage: Message = { role: 'user', content: messageContent };
+    const displayMessage: Message = { role: 'user', content: text };
     const updated = [...messages, newMessage];
-    pushMessages([newMessage]);
+    pushMessages([displayMessage]);
     sendMessages(updated);
   }, [textInput, voiceState, messages, sendMessages, pushMessages, sessionDone]);
 
@@ -509,9 +573,17 @@ export default function VoiceChat() {
           if (transcript.trim()) {
             if (debugMode) addDebugMessage(`Transcribed: "${transcript}"`);
             showTranscriptFlash(transcript);
-            const newMessage: Message = { role: 'user', content: transcript };
+            // Inject pending update context if user speaks while confirmation is pending
+            const pending = pendingUpdateRef.current;
+            let messageContent = transcript;
+            if (pending) {
+              setPendingUpdate(null);
+              messageContent = `[Revising pending update with fields: ${JSON.stringify(pending.fields)}] ${transcript}`;
+            }
+            const newMessage: Message = { role: 'user', content: messageContent };
+            const displayMessage: Message = { role: 'user', content: transcript };
             const updated = [...messages, newMessage];
-            pushMessages([newMessage]);
+            pushMessages([displayMessage]);
             sendMessages(updated);
           } else {
             setVoiceStateLogged('unlocked');
@@ -556,9 +628,17 @@ export default function VoiceChat() {
         if (transcript.trim()) {
           if (debugMode) addDebugMessage(`Transcribed: "${transcript}"`);
           showTranscriptFlash(transcript);
-          const newMessage: Message = { role: 'user', content: transcript };
+          // Inject pending update context if user speaks while confirmation is pending
+          const pending = pendingUpdateRef.current;
+          let messageContent = transcript;
+          if (pending) {
+            setPendingUpdate(null);
+            messageContent = `[Revising pending update with fields: ${JSON.stringify(pending.fields)}] ${transcript}`;
+          }
+          const newMessage: Message = { role: 'user', content: messageContent };
+          const displayMessage: Message = { role: 'user', content: transcript };
           const updated = [...messages, newMessage];
-          pushMessages([newMessage]);
+          pushMessages([displayMessage]);
           sendMessages(updated);
         } else {
           setVoiceStateLogged('listening');
@@ -772,6 +852,7 @@ export default function VoiceChat() {
               effort={currentTask.effort}
               projectName={currentTask.projectName}
               description={currentTask.description}
+              aiAgentTakeCare={currentTask.aiAgentTakeCare}
             />
           ) : null}
         </div>
@@ -784,7 +865,7 @@ export default function VoiceChat() {
         )}
 
         {/* Conversation history */}
-        {(chatItems.length > 0 || responseText) && (
+        {(chatItems.length > 0 || responseText || pendingUpdate) && (
           <div
             ref={chatListRef}
             className="w-full max-w-lg mx-auto flex flex-col gap-2 overflow-y-auto"
@@ -823,6 +904,33 @@ export default function VoiceChat() {
                 <div className="max-w-[80%] px-3 py-2 rounded-2xl rounded-bl-sm text-sm leading-relaxed bg-gray-800 text-gray-100 italic opacity-80">
                   {responseText}
                 </div>
+              </div>
+            )}
+
+            {/* Confirmation buttons — shown after AI returns a confirm action */}
+            {pendingUpdate && (
+              <div className="flex gap-2 pt-1">
+                <button
+                  onClick={handleConfirmUpdate}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-green-700 hover:bg-green-600 text-white text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400"
+                  aria-label="Confirm update"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                  Update
+                </button>
+                <button
+                  onClick={handleCancelUpdate}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400"
+                  aria-label="Cancel update"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                  Cancel
+                </button>
               </div>
             )}
           </div>

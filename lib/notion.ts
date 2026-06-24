@@ -4,6 +4,18 @@ const notion = new Client({ auth: process.env.NOTION_API_KEY ?? '' });
 const DB_ID = process.env.NOTION_TASK_DB_ID ?? 'e7870227f50445e49d23e78958bbe61b';
 const PROJECTS_DB_ID = '1b0bc768-b9e6-4104-bec4-6db7f0cd0977';
 
+// Danny Cohen's Notion user ID — used for "Assigned" people_contains filter
+const DANNY_NOTION_USER_ID =
+  process.env.NOTION_USER_ID ?? 'dfca4d29-d375-4915-9dc2-3fb2512d5864';
+
+// Priority sort order for in-memory secondary sort
+const PRIORITY_ORDER: Record<string, number> = {
+  Urgent: 0,
+  High: 1,
+  Medium: 2,
+  Low: 3,
+};
+
 // ── Shared types ─────────────────────────────────────────────────────────────
 
 export interface NotionTask {
@@ -15,6 +27,7 @@ export interface NotionTask {
   description: string | null;
   effort: string | null;
   aiCleanUpStatus: string | null;
+  aiAgentTakeCare: boolean;
   projectId: string | null;
   projectName: string | null;
 }
@@ -36,13 +49,36 @@ export async function getNextTask(): Promise<NotionTask | null> {
 
 /**
  * Fetch the next unreviewed task, excluding any task IDs in the skip list.
- * "Unreviewed" = AI Clean Up Status is not "Completed" (or is empty).
+ *
+ * Filter logic:
+ *   (Assigned contains Danny OR Status = Icebox)
+ *   AND AI Clean Up Status != Completed
+ *   AND AI Clean Up Status != In Progress
+ *
+ * Sort: primary = Date To Work On ascending (nulls last via in-code sort),
+ *       secondary = Priority (Urgent → High → Medium → Low → null) in code.
  */
 export async function getNextTaskDirect(skipIds: string[]): Promise<NotionTask | null> {
   const response = await notion.databases.query({
     database_id: DB_ID,
     filter: {
-      or: [
+      and: [
+        {
+          or: [
+            {
+              property: 'Assigned',
+              people: {
+                contains: DANNY_NOTION_USER_ID,
+              },
+            },
+            {
+              property: 'Status',
+              status: {
+                equals: 'Icebox',
+              },
+            },
+          ],
+        },
         {
           property: 'AI Clean Up Status',
           select: {
@@ -52,25 +88,56 @@ export async function getNextTaskDirect(skipIds: string[]): Promise<NotionTask |
         {
           property: 'AI Clean Up Status',
           select: {
-            is_empty: true,
+            does_not_equal: 'In Progress',
           },
         },
       ],
-    },
+    } as Parameters<typeof notion.databases.query>[0]['filter'],
     sorts: [
       {
-        timestamp: 'created_time',
+        property: 'Date To Work On',
         direction: 'ascending',
       },
     ],
-    page_size: skipIds.length + 10, // fetch extra to account for skip list
+    page_size: skipIds.length + 50, // fetch extra to account for skip list + in-code sort
   });
 
-  // Find the first result not in skipIds
-  const page = response.results.find(
+  // Filter out skipped tasks
+  const candidates = response.results.filter(
     (p) => p.object === 'page' && !skipIds.includes(p.id)
   );
 
+  if (candidates.length === 0) return null;
+
+  // Secondary sort by priority (Notion only supports one sort key)
+  // Primary: Date To Work On ascending (nulls last) — already sorted by Notion
+  // Secondary: in-code priority sort within same date bucket
+  const sorted = [...candidates].sort((a, b) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const aProps = (a as any).properties;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bProps = (b as any).properties;
+
+    const aDate: string | null = aProps['Date To Work On']?.date?.start ?? null;
+    const bDate: string | null = bProps['Date To Work On']?.date?.start ?? null;
+
+    // Nulls last
+    if (aDate === null && bDate !== null) return 1;
+    if (aDate !== null && bDate === null) return -1;
+    if (aDate !== bDate) {
+      if (aDate === null || bDate === null) return 0;
+      return aDate < bDate ? -1 : 1;
+    }
+
+    // Same date — sort by priority
+    const aPri: string | null = aProps['Priority']?.select?.name ?? null;
+    const bPri: string | null = bProps['Priority']?.select?.name ?? null;
+    const aOrder = aPri !== null ? (PRIORITY_ORDER[aPri] ?? 4) : 4;
+    const bOrder = bPri !== null ? (PRIORITY_ORDER[bPri] ?? 4) : 4;
+    return aOrder - bOrder;
+  });
+
+  const page = sorted[0];
   if (!page || page.object !== 'page') return null;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -84,6 +151,7 @@ export async function getNextTaskDirect(skipIds: string[]): Promise<NotionTask |
   const description: string | null = props['Description']?.rich_text?.[0]?.plain_text ?? null;
   const effort: string | null = props['Effort']?.select?.name ?? null;
   const aiCleanUpStatus: string | null = props['AI Clean Up Status']?.select?.name ?? null;
+  const aiAgentTakeCare: boolean = props['AI Agent Take Care']?.checkbox ?? false;
 
   // First related project ID
   const projectRelations: { id: string }[] = props['Projects']?.relation ?? [];
@@ -110,6 +178,7 @@ export async function getNextTaskDirect(skipIds: string[]): Promise<NotionTask |
     description,
     effort,
     aiCleanUpStatus,
+    aiAgentTakeCare,
     projectId,
     projectName,
   };
@@ -159,6 +228,7 @@ export async function updateTask(
     effort?: string;
     aiCleanUpStatus?: string;
     projectId?: string;
+    aiAgentTakeCare?: boolean;
   }
 ): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -195,6 +265,10 @@ export async function updateTask(
     properties['Projects'] = {
       relation: [{ id: fields.projectId }],
     };
+  }
+
+  if (fields.aiAgentTakeCare !== undefined) {
+    properties['AI Agent Take Care'] = { checkbox: fields.aiAgentTakeCare };
   }
 
   if (Object.keys(properties).length === 0) return;

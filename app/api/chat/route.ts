@@ -52,26 +52,28 @@ Analyze the user's message and decide ONE of:
    Respond with ONLY this JSON (no other text):
    {"action":"skip"}
 
-2. UPDATE — User provided information about the task.
-   Extract as many fields as possible from the message + existing task data.
-   Fields to fill: priority, dateToWorkOn (YYYY-MM-DD), status, description, effort, aiCleanUpStatus, projectId
+2. CONFIRM — User provided information about the task. Collect info, then present a confirmation.
+   Fields to fill: priority, dateToWorkOn (YYYY-MM-DD), status, description, effort, aiCleanUpStatus, projectId, aiAgentTakeCare
 
    For projectId: match the task to the most appropriate project from the projects list based on the task title, description, and user's message. Use your best judgment.
-
-   If you have enough info to fill ALL required fields (at minimum: description and either priority or dateToWorkOn), respond with ONLY this JSON:
-   {"action":"update","fields":{"priority":"...","dateToWorkOn":"...","status":"...","description":"...","effort":"...","aiCleanUpStatus":"Completed","projectId":"..."}}
+   For aiAgentTakeCare: true if user says an AI agent should handle this, false if they'll do it themselves. Ask if not mentioned: "Will you handle this yourself or should an AI agent take care of it?"
 
    If you're missing critical info, ask ONE focused follow-up question as plain text (not JSON). Keep it short — one sentence.
+
+   When you have enough information (at minimum: description and either priority or dateToWorkOn), respond with ONLY this JSON:
+   {"action":"confirm","fields":{"priority":"...","dateToWorkOn":"...","status":"...","description":"...","effort":"...","aiCleanUpStatus":"Completed","projectId":"...","aiAgentTakeCare":false},"summary":"Here's what I'll update: [natural language summary covering all fields being set]. Ready to update?"}
 
 IMPORTANT RULES:
 - When responding with action JSON, output ONLY the raw JSON object with NO markdown formatting, NO code blocks, NO backticks, NO extra text before or after
 - When asking a follow-up, keep it to one sentence
 - Never wrap output in markdown code fences or backticks
+- NEVER use {"action":"update"} — always go through confirm first
 - aiCleanUpStatus should be set to "Completed" whenever you update a task (it's been reviewed)
 - For dateToWorkOn: if user says "tomorrow" calculate from today's date
 - For priority: normalize to one of: Urgent, High, Medium, Low
 - For effort: normalize to one of: High, Medium, Low
 - For status: normalize to one of: Backlog, Blocked, On Deck, Scheduled, Today, Icebox, In Progress, Pending, Approved, Ongoing, In Review, Completed
+- The summary field should be one readable sentence covering all fields being set (e.g. "I'll set description to 'Fix the login bug', priority High, date June 25, effort Medium, project MyBundle, AI agent task: no.")
 - Today's date: ${today}`;
 }
 

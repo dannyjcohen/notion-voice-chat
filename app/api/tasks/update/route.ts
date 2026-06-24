@@ -12,6 +12,7 @@ export async function POST(request: Request) {
         effort?: string;
         aiCleanUpStatus?: string;
         projectId?: string;
+        aiAgentTakeCare?: boolean;
       };
     };
 

@@ -10,6 +10,7 @@ interface TaskCardProps {
   effort: string | null;
   projectName: string | null;
   description: string | null;
+  aiAgentTakeCare?: boolean;
 }
 
 const PRIORITY_COLORS: Record<string, string> = {
@@ -27,6 +28,7 @@ export default function TaskCard({
   effort,
   projectName,
   description,
+  aiAgentTakeCare = false,
 }: TaskCardProps) {
   const [descExpanded, setDescExpanded] = useState(false);
 
@@ -147,6 +149,25 @@ export default function TaskCard({
           )}
         </div>
       )}
+
+      {/* AI Agent Task checkbox row */}
+      <div className="flex items-center gap-2 pt-1" aria-label={`AI Agent Task: ${aiAgentTakeCare ? 'yes' : 'no'}`}>
+        <span
+          className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${
+            aiAgentTakeCare
+              ? 'bg-blue-600 border-blue-500'
+              : 'bg-transparent border-gray-600'
+          }`}
+          aria-hidden="true"
+        >
+          {aiAgentTakeCare && (
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          )}
+        </span>
+        <span className="text-xs text-gray-500">AI Agent Task</span>
+      </div>
     </div>
   );
 }

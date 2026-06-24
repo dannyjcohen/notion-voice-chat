@@ -47,5 +47,6 @@ test-audio.wav
 scripts/gen-test-wav.js
 scripts/introspect-notion.js
 scripts/verify-ui.js
+scripts/check-assignee.js
 test-results/
 verify-screenshot.png

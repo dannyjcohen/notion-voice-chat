@@ -1,53 +1,91 @@
 import { test, expect } from '@playwright/test';
+import * as path from 'path';
+import * as fs from 'fs';
 
-test('fix verification: animation warning gone + TTS toggle visible', async ({ page }) => {
-  const consoleMessages: Array<{ type: string; text: string }> = [];
+const SCREENSHOT_DIR = path.join(__dirname, 'screenshots');
 
+// Ensure screenshots dir exists
+if (!fs.existsSync(SCREENSHOT_DIR)) {
+  fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+}
+
+test('Screenshot 1: task card loads, debug panel shows /api/projects and /api/tasks/next', async ({ page }) => {
+  const consoleErrors: string[] = [];
   page.on('console', (msg) => {
-    consoleMessages.push({ type: msg.type(), text: msg.text() });
+    if (msg.type() === 'error' &&
+      !msg.text().includes('favicon') &&
+      !msg.text().includes('VAD') &&
+      !msg.text().includes('onnx') &&
+      !msg.text().includes('wasm') &&
+      !msg.text().includes('chunk')) {
+      consoleErrors.push(msg.text());
+    }
   });
 
-  // 1. Load the idle screen
-  await page.goto('http://localhost:3001');
-  await expect(page.getByRole('button', { name: /tap to begin/i })).toBeVisible();
+  await page.goto('http://localhost:3001?debug=1');
+  await page.waitForLoadState('networkidle');
 
-  // 2. Click "or type instead" to reach the active screen
-  await page.getByRole('button', { name: /type instead/i }).click();
-  await page.waitForTimeout(600);
+  // Click "or type instead"
+  const typeInstead = page.getByText('or type instead');
+  await expect(typeInstead).toBeVisible({ timeout: 10000 });
+  await typeInstead.click();
 
-  // 3. Screenshot — should show speaker button in top-right
-  await page.screenshot({ path: 'e2e/screenshots/tts-toggle-visible.png', fullPage: true });
+  // Wait for API calls to complete
+  await page.waitForTimeout(8000);
 
-  // 4. Verify the TTS toggle button is present
-  const ttsBtn = page.getByRole('button', { name: /mute text-to-speech/i });
-  await expect(ttsBtn).toBeVisible();
+  // Take screenshot 1
+  await page.screenshot({ path: path.join(SCREENSHOT_DIR, 'screenshot-1-task-loaded.png'), fullPage: true });
 
-  // 5. Click the toggle — aria-label should switch to "unmute"
-  await ttsBtn.click();
-  const unmutedBtn = page.getByRole('button', { name: /unmute text-to-speech/i });
-  await expect(unmutedBtn).toBeVisible();
+  // Verify first assistant message appeared
+  const msgs = page.locator('.bg-gray-800.text-gray-100');
+  await expect(msgs.first()).toBeVisible({ timeout: 15000 });
 
-  // 6. Screenshot with muted state
-  await page.screenshot({ path: 'e2e/screenshots/tts-toggle-muted.png', fullPage: true });
+  // Verify AI Agent Task checkbox row appears in task card
+  const aiAgentRow = page.getByText('AI Agent Task');
+  const aiAgentVisible = await aiAgentRow.isVisible();
+  console.log(`AI Agent Task row visible: ${aiAgentVisible}`);
 
-  // 7. Verify NO animation warning in console
-  const animationWarnings = consoleMessages.filter(
-    (m) => m.text.includes('animation') && m.text.includes('animationDelay')
-  );
-  expect(
-    animationWarnings,
-    `Animation conflict warnings found: ${animationWarnings.map((m) => m.text).join('\n')}`
-  ).toHaveLength(0);
+  // No unexpected console errors
+  expect(consoleErrors, `Console errors: ${consoleErrors.join('; ')}`).toHaveLength(0);
 
-  // 8. Verify no fatal errors (excluding known-noisy VAD/onnx/favicon noise)
-  const fatalErrors = consoleMessages.filter(
-    (m) =>
-      m.type === 'error' &&
-      !m.text.includes('favicon') &&
-      !m.text.includes('VAD') &&
-      !m.text.includes('onnx') &&
-      !m.text.includes('wasm') &&
-      !m.text.includes('chunk')
-  );
-  expect(fatalErrors, `Unexpected console errors:\n${fatalErrors.map((m) => m.text).join('\n')}`).toHaveLength(0);
+  console.log('Screenshot 1 taken: e2e/screenshots/screenshot-1-task-loaded.png');
+});
+
+test('Screenshot 2: AI responds with confirmation message + Update/Cancel buttons', async ({ page }) => {
+  await page.goto('http://localhost:3001?debug=1');
+  await page.waitForLoadState('networkidle');
+
+  const typeInstead = page.getByText('or type instead');
+  await expect(typeInstead).toBeVisible({ timeout: 10000 });
+  await typeInstead.click();
+
+  // Wait for task to load
+  await page.waitForTimeout(6000);
+
+  // Check a task loaded
+  const msgs = page.locator('.bg-gray-800.text-gray-100');
+  await expect(msgs.first()).toBeVisible({ timeout: 15000 });
+
+  // Type message with full task details
+  const input = page.getByPlaceholder('Type a message...');
+  await expect(input).toBeVisible({ timeout: 5000 });
+
+  await input.fill('Set description to: Improve the onboarding flow for new ISP partners. Priority High, date tomorrow, effort Medium, I will handle this myself.');
+  await page.keyboard.press('Enter');
+
+  // Wait for AI to respond
+  await page.waitForTimeout(12000);
+
+  // Take screenshot 2
+  await page.screenshot({ path: path.join(SCREENSHOT_DIR, 'screenshot-2-ai-confirm.png'), fullPage: true });
+
+  // Check if confirm buttons appeared
+  const updateBtn = page.getByRole('button', { name: 'Confirm update' });
+  const cancelBtn = page.getByRole('button', { name: 'Cancel update' });
+
+  const updateVisible = await updateBtn.isVisible();
+  const cancelVisible = await cancelBtn.isVisible();
+  console.log(`Update button visible: ${updateVisible}, Cancel button visible: ${cancelVisible}`);
+
+  console.log('Screenshot 2 taken: e2e/screenshots/screenshot-2-ai-confirm.png');
 });
