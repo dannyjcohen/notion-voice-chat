@@ -107,6 +107,24 @@ export default function VoiceChat() {
   const [currentTask, setCurrentTask] = useState<CurrentTask | null>(null);
   const [holdToSpeak, setHoldToSpeak] = useState(false);
 
+  // TTS enabled preference (persisted to localStorage)
+  const [ttsEnabled, setTtsEnabled] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    return localStorage.getItem('ttsEnabled') !== 'false';
+  });
+  const ttsEnabledRef = useRef(ttsEnabled);
+  useEffect(() => {
+    ttsEnabledRef.current = ttsEnabled;
+  }, [ttsEnabled]);
+
+  const toggleTts = useCallback(() => {
+    setTtsEnabled((prev) => {
+      const next = !prev;
+      localStorage.setItem('ttsEnabled', String(next));
+      return next;
+    });
+  }, []);
+
   // Text input state
   const [textInput, setTextInput] = useState('');
 
@@ -180,8 +198,12 @@ export default function VoiceChat() {
 
     while (ttsQueueRef.current.length > 0) {
       const sentence = ttsQueueRef.current.shift()!;
-      log(`TTS: speaking "${sentence.slice(0, 30)}..."`);
-      await speakSentence(sentence);
+      if (ttsEnabledRef.current) {
+        log(`TTS: speaking "${sentence.slice(0, 30)}..."`);
+        await speakSentence(sentence);
+      } else {
+        log(`TTS: muted, skipping "${sentence.slice(0, 30)}..."`);
+      }
     }
 
     ttsDrainingRef.current = false;
@@ -653,7 +675,29 @@ export default function VoiceChat() {
   // ── Active screen (unlocked / listening / processing / speaking) ──
   return (
     <>
-      <div className={`flex flex-col min-h-screen bg-gray-950 px-4 py-8 gap-4${debugMode ? ' pb-80' : ''}`}>
+      <div className={`relative flex flex-col min-h-screen bg-gray-950 px-4 py-8 gap-4${debugMode ? ' pb-80' : ''}`}>
+        {/* TTS mute toggle — top-right corner */}
+        <button
+          onClick={toggleTts}
+          aria-label={ttsEnabled ? 'Mute text-to-speech' : 'Unmute text-to-speech'}
+          className="absolute top-4 right-4 p-1.5 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+        >
+          {ttsEnabled ? (
+            /* Speaker with sound waves */
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M11 5L6 9H3a1 1 0 00-1 1v4a1 1 0 001 1h3l5 4V5z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15.54 8.46a5 5 0 010 7.07" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19.07 4.93a10 10 0 010 14.14" />
+            </svg>
+          ) : (
+            /* Speaker with X */
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M11 5L6 9H3a1 1 0 00-1 1v4a1 1 0 001 1h3l5 4V5z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M17 14l4-4m0 4l-4-4" />
+            </svg>
+          )}
+        </button>
+
         {/* Top: task card */}
         <div className="flex justify-center">
           {currentTask ? (
