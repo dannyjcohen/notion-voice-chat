@@ -496,8 +496,9 @@ export default function VoiceChat() {
     if (voiceState !== 'idle') return;
     log('type instead → unlocked (no audio)');
     setVoiceStateLogged('unlocked');
-    startSession();
-  }, [voiceState, startSession, setVoiceStateLogged, log]);
+    // Do NOT call startSession() — the user will type their first message
+    // themselves. sendMessages() will handle context from there.
+  }, [voiceState, setVoiceStateLogged, log]);
 
   // ── Pause/restart VAD around TTS ─────────────────────────────────────────
 
@@ -516,7 +517,9 @@ export default function VoiceChat() {
     (m, i) => !(i === 0 && m.role === 'user' && m.content === 'Start the review session.')
   );
 
-  const isInputDisabled = voiceState === 'processing' || voiceState === 'speaking';
+  // Controls disabled for Done/Skip/Send button — but NOT for the text input itself.
+  // The text input stays enabled always so the user can pre-type while AI responds.
+  const isSendDisabled = voiceState === 'processing' || voiceState === 'speaking';
 
   // ── Idle screen ──
   if (voiceState === 'idle') {
@@ -641,6 +644,13 @@ export default function VoiceChat() {
           )}
         </div>
 
+        {/* Empty state prompt — shown when no messages yet (text-mode entry) */}
+        {messages.length === 0 && (
+          <p className="text-gray-600 text-sm text-center mt-8">
+            Ask about your tasks to get started
+          </p>
+        )}
+
         {/* Conversation history */}
         {(visibleMessages.length > 0 || responseText) && (
           <div
@@ -696,7 +706,7 @@ export default function VoiceChat() {
           <div className="flex gap-4">
             <button
               onClick={handleDone}
-              disabled={isInputDisabled}
+              disabled={isSendDisabled}
               className="px-5 py-2.5 rounded-xl bg-green-700 hover:bg-green-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
               aria-label="Mark task as done"
             >
@@ -704,7 +714,7 @@ export default function VoiceChat() {
             </button>
             <button
               onClick={handleSkip}
-              disabled={isInputDisabled}
+              disabled={isSendDisabled}
               className="px-5 py-2.5 rounded-xl bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
               aria-label="Skip task to tomorrow"
             >
@@ -719,14 +729,13 @@ export default function VoiceChat() {
               value={textInput}
               onChange={(e) => setTextInput(e.target.value)}
               onKeyDown={handleTextKeyDown}
-              disabled={isInputDisabled}
-              placeholder={isInputDisabled ? 'Waiting…' : 'Type a message…'}
-              className="flex-1 px-4 py-2.5 rounded-xl bg-gray-800 border border-gray-700 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-gray-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              placeholder="Type a message…"
+              className="flex-1 px-4 py-2.5 rounded-xl bg-gray-800 border border-gray-700 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-gray-500 transition-colors"
               aria-label="Type a message"
             />
             <button
               onClick={handleTextSubmit}
-              disabled={isInputDisabled || !textInput.trim()}
+              disabled={isSendDisabled || !textInput.trim()}
               className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
               aria-label="Send message"
             >
