@@ -9,6 +9,14 @@ import {
   updateTaskFields,
 } from '@/lib/notion';
 
+// ── Types for tool events ──────────────────────────────────────────────────
+
+type StreamPart =
+  | { type: 'text-delta'; textDelta: string }
+  | { type: 'tool-call'; toolName: string; args: unknown }
+  | { type: 'tool-result'; toolName: string; result: unknown }
+  | { type: 'finish' | 'error' | 'step-start' | 'step-finish'; [key: string]: unknown };
+
 export const maxDuration = 30;
 
 const SYSTEM_PROMPT = `You are a helpful AI task reviewer. You have access to the user's Notion task queue via tools.
@@ -111,7 +119,40 @@ export async function POST(request: Request) {
       },
     });
 
-    return result.toTextStreamResponse();
+    // Build a custom text stream that injects [TOOL:...] / [TOOL_RESULT:...] lines
+    // so the client can log tool calls in the debug panel without a separate channel.
+    const encoder = new TextEncoder();
+    const customStream = new ReadableStream({
+      async start(controller) {
+        try {
+          for await (const part of result.fullStream as AsyncIterable<StreamPart>) {
+            if (part.type === 'text-delta') {
+              controller.enqueue(encoder.encode(part.textDelta));
+            } else if (part.type === 'tool-call') {
+              // Inject a tool call marker line (filtered out on the client side)
+              controller.enqueue(
+                encoder.encode(`\n[TOOL:${part.toolName}:${JSON.stringify(part.args)}]\n`)
+              );
+            } else if (part.type === 'tool-result') {
+              // Inject a tool result marker line (filtered out on the client side)
+              const resultStr = JSON.stringify(part.result).slice(0, 500);
+              controller.enqueue(
+                encoder.encode(`\n[TOOL_RESULT:${part.toolName}:${resultStr}]\n`)
+              );
+            }
+          }
+        } catch (streamErr) {
+          const message = streamErr instanceof Error ? streamErr.message : String(streamErr);
+          console.error('[chat] stream error:', message);
+        } finally {
+          controller.close();
+        }
+      },
+    });
+
+    return new Response(customStream, {
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[chat] streamText error:', message);

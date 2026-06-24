@@ -24,6 +24,30 @@ interface CurrentTask {
   description: string | null;
 }
 
+// ── Tool event line pattern ────────────────────────────────────────────────
+
+const TOOL_LINE_RE = /^\[TOOL(?:_RESULT)?:[^\]]+\]$/;
+
+function isToolLine(line: string): boolean {
+  return TOOL_LINE_RE.test(line.trim());
+}
+
+// Strip [TOOL:...] and [TOOL_RESULT:...] lines from text, return cleaned text
+// and an array of extracted tool event strings.
+function extractToolLines(text: string): { cleaned: string; toolEvents: string[] } {
+  const lines = text.split('\n');
+  const toolEvents: string[] = [];
+  const kept: string[] = [];
+  for (const line of lines) {
+    if (isToolLine(line)) {
+      toolEvents.push(line.trim());
+    } else {
+      kept.push(line);
+    }
+  }
+  return { cleaned: kept.join('\n'), toolEvents };
+}
+
 // ── Empty-state detector ───────────────────────────────────────────────────
 
 const EMPTY_PHRASES = [
@@ -73,6 +97,13 @@ export default function VoiceChat() {
   const [currentTask, setCurrentTask] = useState<CurrentTask | null>(null);
   const [holdToSpeak, setHoldToSpeak] = useState(false);
 
+  // Text input state
+  const [textInput, setTextInput] = useState('');
+
+  // Transcript flash state (shows briefly after VAD transcription)
+  const [transcriptFlash, setTranscriptFlash] = useState('');
+  const transcriptFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Debug mode — read from URL param via useEffect to avoid SSR issues
   const [debugMode, setDebugMode] = useState(false);
   useEffect(() => {
@@ -81,6 +112,12 @@ export default function VoiceChat() {
 
   // Debug log hook
   const { events, lastApiCall, log, logApiStart, logApiEnd } = useDebugLog();
+
+  // Last sent payload ref for debug panel
+  const lastPayloadRef = useRef<Message[]>([]);
+
+  // Chat message list scroll ref
+  const chatListRef = useRef<HTMLDivElement>(null);
 
   // Helper: setState with logging
   const setVoiceStateLogged = useCallback(
@@ -94,6 +131,24 @@ export default function VoiceChat() {
     },
     [log]
   );
+
+  // Auto-scroll chat list to bottom on new messages
+  useEffect(() => {
+    if (chatListRef.current) {
+      chatListRef.current.scrollTop = chatListRef.current.scrollHeight;
+    }
+  }, [messages, responseText]);
+
+  // Show a transcript flash briefly, then clear
+  const showTranscriptFlash = useCallback((text: string) => {
+    setTranscriptFlash(text);
+    if (transcriptFlashTimerRef.current) {
+      clearTimeout(transcriptFlashTimerRef.current);
+    }
+    transcriptFlashTimerRef.current = setTimeout(() => {
+      setTranscriptFlash('');
+    }, 2500);
+  }, []);
 
   // TTS queue state
   const ttsQueueRef = useRef<string[]>([]);
@@ -133,6 +188,9 @@ export default function VoiceChat() {
   const sendMessages = useCallback(async (msgs: Message[]) => {
     setVoiceStateLogged('processing');
     setResponseText('');
+
+    // Record last payload for debug panel
+    lastPayloadRef.current = msgs;
 
     let fullText = '';
     let sentenceBuffer = '';
@@ -176,15 +234,22 @@ export default function VoiceChat() {
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        fullText += chunk;
-        sentenceBuffer += chunk;
+        const { cleaned, toolEvents } = extractToolLines(chunk);
+
+        // Log any tool events to debug panel
+        for (const event of toolEvents) {
+          log(event);
+        }
+
+        fullText += cleaned;
+        sentenceBuffer += cleaned;
         setResponseText(fullText);
 
-        // Push complete sentences to TTS queue
+        // Push complete sentences to TTS queue (skip lines that look like tool markers)
         const sentences = sentenceBuffer.match(/[^.!?]+[.!?]+/g) ?? [];
         for (const s of sentences) {
           const trimmed = s.trim();
-          if (trimmed) {
+          if (trimmed && !isToolLine(trimmed)) {
             ttsQueueRef.current.push(trimmed);
           }
         }
@@ -199,7 +264,7 @@ export default function VoiceChat() {
 
       // Push any remaining buffer
       const remaining = sentenceBuffer.trim();
-      if (remaining) {
+      if (remaining && !isToolLine(remaining)) {
         ttsQueueRef.current.push(remaining);
         if (!ttsDrainingRef.current) {
           drainTtsQueue();
@@ -210,6 +275,7 @@ export default function VoiceChat() {
 
       // Update messages with assistant response
       setMessages((prev) => [...prev, { role: 'assistant', content: fullText }]);
+      setResponseText('');
 
       // Detect empty state
       if (detectEmpty(fullText)) {
@@ -224,6 +290,30 @@ export default function VoiceChat() {
       setVoiceStateLogged('unlocked');
     }
   }, [drainTtsQueue, setVoiceStateLogged, log, logApiStart, logApiEnd]);
+
+  // ── Text input submit ─────────────────────────────────────────────────────
+
+  const handleTextSubmit = useCallback(() => {
+    const text = textInput.trim();
+    if (!text) return;
+    if (voiceState === 'processing' || voiceState === 'speaking') return;
+
+    setTextInput('');
+    const newMessage: Message = { role: 'user', content: text };
+    const updated = [...messages, newMessage];
+    setMessages(updated);
+    sendMessages(updated);
+  }, [textInput, voiceState, messages, sendMessages]);
+
+  const handleTextKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleTextSubmit();
+      }
+    },
+    [handleTextSubmit]
+  );
 
   // ── Manual Done / Skip buttons ────────────────────────────────────────────
 
@@ -266,6 +356,7 @@ export default function VoiceChat() {
           logApiEnd('/api/transcribe', res.status, tStartTime, data.transcript);
           const transcript: string = data.transcript ?? '';
           if (transcript.trim()) {
+            showTranscriptFlash(transcript);
             const newMessage: Message = { role: 'user', content: transcript };
             const updated = [...messages, newMessage];
             setMessages(updated);
@@ -288,7 +379,7 @@ export default function VoiceChat() {
       log(`hold-to-speak mic error: ${message}`);
       // Mic permission denied — stay unlocked
     }
-  }, [messages, sendMessages, setVoiceStateLogged, log, logApiStart, logApiEnd]);
+  }, [messages, sendMessages, setVoiceStateLogged, log, logApiStart, logApiEnd, showTranscriptFlash]);
 
   const stopHoldRecord = useCallback(() => {
     mediaRecorderRef.current?.stop();
@@ -312,6 +403,7 @@ export default function VoiceChat() {
         logApiEnd('/api/transcribe', res.status, tStartTime, data.transcript);
         const transcript: string = data.transcript ?? '';
         if (transcript.trim()) {
+          showTranscriptFlash(transcript);
           const newMessage: Message = { role: 'user', content: transcript };
           const updated = [...messages, newMessage];
           setMessages(updated);
@@ -326,7 +418,7 @@ export default function VoiceChat() {
         setVoiceStateLogged('listening');
       }
     },
-    [messages, sendMessages, setVoiceStateLogged, log, logApiStart, logApiEnd]
+    [messages, sendMessages, setVoiceStateLogged, log, logApiStart, logApiEnd, showTranscriptFlash]
   );
 
   // ── VAD hook ──────────────────────────────────────────────────────────────
@@ -404,6 +496,13 @@ export default function VoiceChat() {
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
+  // Messages visible in the chat list (hide the initial session-start message)
+  const visibleMessages = messages.filter(
+    (m, i) => !(i === 0 && m.role === 'user' && m.content === 'Start the review session.')
+  );
+
+  const isInputDisabled = voiceState === 'processing' || voiceState === 'speaking';
+
   // ── Idle screen ──
   if (voiceState === 'idle') {
     return (
@@ -458,6 +557,7 @@ export default function VoiceChat() {
           messageCount={messages.length}
           events={events}
           lastApiCall={lastApiCall}
+          lastPayload={lastPayloadRef.current}
         />
       </>
     );
@@ -494,6 +594,7 @@ export default function VoiceChat() {
           messageCount={messages.length}
           events={events}
           lastApiCall={lastApiCall}
+          lastPayload={lastPayloadRef.current}
         />
       </>
     );
@@ -502,7 +603,7 @@ export default function VoiceChat() {
   // ── Active screen (unlocked / listening / processing / speaking) ──
   return (
     <>
-      <div className="flex flex-col min-h-screen bg-gray-950 px-4 py-8 gap-6">
+      <div className={`flex flex-col min-h-screen bg-gray-950 px-4 py-8 gap-4${debugMode ? ' pb-80' : ''}`}>
         {/* Top: task card */}
         <div className="flex justify-center">
           {currentTask ? (
@@ -517,22 +618,62 @@ export default function VoiceChat() {
           )}
         </div>
 
-        {/* Middle: streaming response text */}
-        {responseText && (
-          <div className="w-full max-w-lg mx-auto">
-            <p className="text-white text-base leading-relaxed">{responseText}</p>
+        {/* Conversation history */}
+        {(visibleMessages.length > 0 || responseText) && (
+          <div
+            ref={chatListRef}
+            className="w-full max-w-lg mx-auto flex flex-col gap-2 overflow-y-auto"
+            style={{ maxHeight: '40vh' }}
+            aria-label="Conversation history"
+            aria-live="polite"
+          >
+            {visibleMessages.map((msg, i) => (
+              <div
+                key={i}
+                className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+              >
+                <div
+                  className={`max-w-[80%] px-3 py-2 rounded-2xl text-sm leading-relaxed ${
+                    msg.role === 'user'
+                      ? 'bg-gray-600 text-white rounded-br-sm'
+                      : 'bg-gray-800 text-gray-100 rounded-bl-sm'
+                  }`}
+                >
+                  {msg.content}
+                </div>
+              </div>
+            ))}
+            {/* Streaming assistant response as a live bubble */}
+            {responseText && (
+              <div className="flex justify-start">
+                <div className="max-w-[80%] px-3 py-2 rounded-2xl rounded-bl-sm text-sm leading-relaxed bg-gray-800 text-gray-100 italic opacity-80">
+                  {responseText}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
         {/* Bottom: status + controls */}
         <div className="flex flex-col items-center gap-4 mt-auto">
+          {/* Transcript flash overlay */}
+          {transcriptFlash && (
+            <div
+              className="px-4 py-2 rounded-xl bg-gray-800/90 text-gray-200 text-sm text-center max-w-xs animate-fade-in"
+              aria-live="polite"
+              aria-label="Transcript"
+            >
+              &ldquo;{transcriptFlash}&rdquo;
+            </div>
+          )}
+
           <StatusIndicator state={voiceState} />
 
           {/* Done + Skip buttons */}
           <div className="flex gap-4">
             <button
               onClick={handleDone}
-              disabled={voiceState === 'processing' || voiceState === 'speaking'}
+              disabled={isInputDisabled}
               className="px-5 py-2.5 rounded-xl bg-green-700 hover:bg-green-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
               aria-label="Mark task as done"
             >
@@ -540,11 +681,33 @@ export default function VoiceChat() {
             </button>
             <button
               onClick={handleSkip}
-              disabled={voiceState === 'processing' || voiceState === 'speaking'}
+              disabled={isInputDisabled}
               className="px-5 py-2.5 rounded-xl bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
               aria-label="Skip task to tomorrow"
             >
               Skip
+            </button>
+          </div>
+
+          {/* Text input bar */}
+          <div className="flex w-full max-w-lg gap-2">
+            <input
+              type="text"
+              value={textInput}
+              onChange={(e) => setTextInput(e.target.value)}
+              onKeyDown={handleTextKeyDown}
+              disabled={isInputDisabled}
+              placeholder={isInputDisabled ? 'Waiting…' : 'Type a message…'}
+              className="flex-1 px-4 py-2.5 rounded-xl bg-gray-800 border border-gray-700 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-gray-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              aria-label="Type a message"
+            />
+            <button
+              onClick={handleTextSubmit}
+              disabled={isInputDisabled || !textInput.trim()}
+              className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
+              aria-label="Send message"
+            >
+              Send
             </button>
           </div>
 
@@ -554,7 +717,7 @@ export default function VoiceChat() {
               onPointerDown={startHoldRecord}
               onPointerUp={stopHoldRecord}
               onPointerLeave={stopHoldRecord}
-              className="mt-2 flex items-center gap-2 px-5 py-3 rounded-xl bg-gray-800 border border-gray-700 text-gray-300 text-sm select-none active:bg-gray-700 transition-colors"
+              className="flex items-center gap-2 px-5 py-3 rounded-xl bg-gray-800 border border-gray-700 text-gray-300 text-sm select-none active:bg-gray-700 transition-colors"
               aria-label="Hold to speak"
             >
               <svg
@@ -593,6 +756,7 @@ export default function VoiceChat() {
         messageCount={messages.length}
         events={events}
         lastApiCall={lastApiCall}
+        lastPayload={lastPayloadRef.current}
       />
     </>
   );

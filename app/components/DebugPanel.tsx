@@ -5,6 +5,11 @@ import type { DebugEvent, ApiCall } from '@/hooks/useDebugLog';
 
 type VoiceState = 'idle' | 'unlocked' | 'listening' | 'processing' | 'speaking' | 'empty';
 
+interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 interface DebugPanelProps {
   debugMode: boolean;
   voiceState: VoiceState;
@@ -14,6 +19,7 @@ interface DebugPanelProps {
   messageCount: number;
   events: DebugEvent[];
   lastApiCall: ApiCall | null;
+  lastPayload: Message[];
 }
 
 // ── Badge helpers ──────────────────────────────────────────────────────────
@@ -70,17 +76,24 @@ export default function DebugPanel({
   messageCount,
   events,
   lastApiCall,
+  lastPayload,
 }: DebugPanelProps) {
   const [responseExpanded, setResponseExpanded] = useState(false);
+  const [payloadExpanded, setPayloadExpanded] = useState(false);
 
   if (!debugMode) return null;
 
   const has503 = lastApiCall !== null && lastApiCall.status === 503;
 
+  // Tool call events extracted from the event log
+  const toolEvents = events.filter(
+    (ev) => ev.message.startsWith('[TOOL:') || ev.message.startsWith('[TOOL_RESULT:')
+  );
+
   return (
     <div
       className="fixed bottom-0 left-0 right-0 z-50 bg-gray-900/95 border-t border-gray-700 text-xs font-mono"
-      style={{ maxHeight: '250px' }}
+      style={{ maxHeight: '300px' }}
       aria-label="Debug panel"
     >
       {/* Header label */}
@@ -90,7 +103,7 @@ export default function DebugPanel({
         </span>
       </div>
 
-      <div className="overflow-y-auto" style={{ maxHeight: '220px' }}>
+      <div className="overflow-y-auto" style={{ maxHeight: '270px' }}>
         {/* Row 1 — State badges */}
         <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-gray-800">
           {/* Voice State */}
@@ -103,15 +116,15 @@ export default function DebugPanel({
           {/* VAD status */}
           {vadErrored ? (
             <span className="px-2 py-0.5 rounded bg-red-900 text-red-300 text-[11px]">
-              ✗ VAD errored
+              VAD errored
             </span>
           ) : vadListening ? (
             <span className="px-2 py-0.5 rounded bg-green-900 text-green-300 text-[11px]">
-              ✓ VAD active
+              VAD active
             </span>
           ) : (
             <span className="px-2 py-0.5 rounded bg-gray-700 text-gray-400 text-[11px]">
-              — VAD not started
+              VAD not started
             </span>
           )}
 
@@ -139,10 +152,10 @@ export default function DebugPanel({
           </div>
         )}
 
-        {/* Row 5 — 503 warning (shown above event log when relevant) */}
+        {/* Row — 503 warning */}
         {has503 && (
           <div className="px-3 py-1.5 border-b border-gray-800 bg-yellow-900/40 text-yellow-300">
-            ⚠ API returning 503 — env vars not configured. Create .env.local from .env.local.example
+            API returning 503 — env vars not configured. Create .env.local from .env.local.example
           </div>
         )}
 
@@ -153,7 +166,7 @@ export default function DebugPanel({
           ) : (
             <div className="space-y-0.5">
               {events.map((ev, i) => (
-                <div key={i} className="text-gray-300">
+                <div key={i} className={`${ev.message.startsWith('[TOOL') ? 'text-cyan-400' : 'text-gray-300'}`}>
                   <span className="text-gray-500 mr-2">{ev.time}</span>
                   {ev.message}
                 </div>
@@ -162,9 +175,26 @@ export default function DebugPanel({
           )}
         </div>
 
-        {/* Row 4 — Last API response (collapsible) */}
+        {/* Row 4 — Tool calls log (summary of tool events only) */}
+        {toolEvents.length > 0 && (
+          <div className="px-3 py-2 border-b border-gray-800">
+            <div className="text-gray-500 uppercase tracking-widest text-[10px] font-semibold mb-1">
+              Tool calls ({toolEvents.length})
+            </div>
+            <div className="space-y-0.5">
+              {toolEvents.map((ev, i) => (
+                <div key={i} className="text-cyan-300 text-[11px]">
+                  <span className="text-gray-500 mr-2">{ev.time}</span>
+                  {ev.message.slice(0, 120)}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Row 5 — Last API response (collapsible) */}
         {lastApiCall?.responsePreview && (
-          <div className="px-3 py-2">
+          <div className="px-3 py-2 border-b border-gray-800">
             <button
               onClick={() => setResponseExpanded((v) => !v)}
               className="text-gray-400 hover:text-gray-200 transition-colors"
@@ -176,6 +206,33 @@ export default function DebugPanel({
               <pre className="mt-1 text-gray-300 whitespace-pre-wrap break-all text-[11px] leading-relaxed">
                 {lastApiCall.responsePreview.slice(0, 500)}
               </pre>
+            )}
+          </div>
+        )}
+
+        {/* Row 6 — Last sent payload (collapsible) */}
+        {lastPayload.length > 0 && (
+          <div className="px-3 py-2">
+            <button
+              onClick={() => setPayloadExpanded((v) => !v)}
+              className="text-gray-400 hover:text-gray-200 transition-colors"
+              aria-expanded={payloadExpanded}
+            >
+              Last payload ({lastPayload.length} msgs) {payloadExpanded ? '▲' : '▼'}
+            </button>
+            {payloadExpanded && (
+              <div className="mt-1 space-y-0.5">
+                {lastPayload.map((msg, i) => (
+                  <div key={i} className="text-[11px]">
+                    <span className={msg.role === 'user' ? 'text-blue-400' : 'text-green-400'}>
+                      [{msg.role}]
+                    </span>
+                    <span className="text-gray-400 ml-1">
+                      {msg.content.slice(0, 80)}{msg.content.length > 80 ? '…' : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
         )}
