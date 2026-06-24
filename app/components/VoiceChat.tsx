@@ -445,6 +445,14 @@ export default function VoiceChat() {
     }
   }, [vad.errored, log]);
 
+  // ── Shared session start ──────────────────────────────────────────────────
+
+  const startSession = useCallback(() => {
+    const initial: Message[] = [{ role: 'user', content: 'Start the review session.' }];
+    setMessages(initial);
+    sendMessages(initial);
+  }, [sendMessages]);
+
   // ── iOS AudioContext unlock + first message ───────────────────────────────
 
   const handleTap = useCallback(async () => {
@@ -479,10 +487,17 @@ export default function VoiceChat() {
     }
 
     // Step 3: Send initial message to kick off the session
-    const initial: Message[] = [{ role: 'user', content: 'Start the review session.' }];
-    setMessages(initial);
-    sendMessages(initial);
-  }, [voiceState, vad, sendMessages, setVoiceStateLogged, log]);
+    startSession();
+  }, [voiceState, vad, startSession, setVoiceStateLogged, log]);
+
+  // ── Type-instead entry point (skips all audio/mic) ───────────────────────
+
+  const handleTypeInstead = useCallback(() => {
+    if (voiceState !== 'idle') return;
+    log('type instead → unlocked (no audio)');
+    setVoiceStateLogged('unlocked');
+    startSession();
+  }, [voiceState, startSession, setVoiceStateLogged, log]);
 
   // ── Pause/restart VAD around TTS ─────────────────────────────────────────
 
@@ -546,6 +561,14 @@ export default function VoiceChat() {
           </button>
 
           <p className="mt-8 text-gray-400 text-base">Tap to begin</p>
+
+          <button
+            onClick={handleTypeInstead}
+            className="mt-3 text-gray-600 text-sm hover:text-gray-400 transition-colors focus:outline-none focus-visible:underline"
+            aria-label="Skip microphone and type instead"
+          >
+            or type instead
+          </button>
         </div>
 
         <DebugPanel
