@@ -49,9 +49,12 @@ Instructions:
 2. DESCRIPTION (always required): Summarize what the user said about this task. Always append the original task title at the very end, on its own line, prefixed with "Original: ".
 3. DATE TO WORK ON: If the user mentions a day of the week (e.g. "Monday") or a relative date (e.g. "next week"), resolve it to a specific YYYY-MM-DD date. ALWAYS choose the next future occurrence — never a date in the past or today. If no date is mentioned, omit this field.
 4. PRIORITY: Include only if the user explicitly mentions a priority level. Values: Urgent, High, Medium, Low.
-5. PROJECT: Try to match to one of the available projects based on context clues in the transcript, even if not explicitly named. If you can make a reasonable match, include the project id. If genuinely unclear, omit.
+5. PROJECT: Always try to match to one of the available projects. Use any context clue — keywords, abbreviations, company names, product names, or topics mentioned. Partial/approximate matches are fine; make your best guess. Only omit if there is genuinely zero connection to any project.
 6. EFFORT: Include only if the user explicitly mentions effort level. Values: High, Medium, Low.
-7. AI AGENT TAKE CARE: Set to true only if the user explicitly says something like "AI can handle this", "have the agent do it", "delegate to AI", etc. Omit otherwise.
+7. AI AGENT TAKE CARE:
+   - Set to true if the user says AI/an agent should handle it ("AI can handle this", "have the agent do it", "delegate to AI", etc.).
+   - Set to false if the user explicitly says they will do it themselves ("I'll do this", "me working on it", "I'm handling it", "it's going to be me", etc.).
+   - Omit entirely only if the user says nothing about who will do the task.
 8. COMPLETENESS: Set to "complete" if dateToWorkOn AND priority are both present (title, description, and project are always generated so they don't affect completeness). Otherwise "partial".
 
 Return a JSON object in exactly this shape (example values shown):
@@ -70,7 +73,8 @@ Return a JSON object in exactly this shape (example values shown):
 
 Field rules:
 - "title" and "description" must always be present.
-- "dateToWorkOn", "priority", "projectId", "effort", "aiAgentTakeCare" — include only when applicable per the instructions above. If not applicable, omit the key entirely (do not include null, empty string, or false).
+- "dateToWorkOn", "priority", "projectId", "effort" — include only when applicable per the instructions above. If not applicable, omit the key entirely (do not include null or empty string).
+- "aiAgentTakeCare" — include true (AI handles it), false (user explicitly said they will do it), or omit entirely (not mentioned). Never omit when the user clearly stated who is doing the task.
 - "completeness" must be either "complete" or "partial".
 - Output only the JSON object. No explanation, no markdown fences.`;
 

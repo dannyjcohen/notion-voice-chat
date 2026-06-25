@@ -323,6 +323,9 @@ export default function VoiceDump() {
     if (f.dateToWorkOn != null) identifiedFields.dateToWorkOn = f.dateToWorkOn;
     if (f.priority != null) identifiedFields.priority = f.priority;
     if (f.projectId != null) identifiedFields.projectId = f.projectId;
+    if (f.effort != null) identifiedFields.effort = f.effort;
+    // aiAgentTakeCare: send both true AND false — false is an explicit human declaration
+    if (f.aiAgentTakeCare != null) identifiedFields.aiAgentTakeCare = f.aiAgentTakeCare;
 
     identifiedFields.aiCleanUpStatus =
       parseResult.completeness === 'complete' ? 'Completed' : 'In Progress';
@@ -399,7 +402,11 @@ export default function VoiceDump() {
 
   function getFieldDisplayValue(key: keyof ParsedFields, fields: ParsedFields): string | null {
     if (key === 'projectName') return fields.projectName ?? null;
-    if (key === 'aiAgentTakeCare') return fields.aiAgentTakeCare ? 'Yes' : null;
+    if (key === 'aiAgentTakeCare') {
+      if (fields.aiAgentTakeCare === true) return 'Yes — delegate to AI';
+      if (fields.aiAgentTakeCare === false) return "No — I'll handle it";
+      return null;
+    }
     const val = fields[key];
     return (val != null && val !== '') ? String(val) : null;
   }
@@ -506,9 +513,31 @@ export default function VoiceDump() {
         {/* Idle — ready to record */}
         {pageState === 'idle' && currentTask && (
           <div className="flex flex-col items-center gap-4 w-full">
-            {accumulatedTranscript ? (
-              <div className="w-full px-4 py-2.5 rounded-xl bg-blue-950 border border-blue-800 text-xs text-blue-300 text-center leading-relaxed">
-                Previous recording captured — add more details or correct what I got wrong
+            {accumulatedTranscript && parseResult ? (
+              <div className="w-full rounded-xl bg-gray-900 border border-gray-800 overflow-hidden">
+                <p className="px-4 pt-3 pb-1 text-xs text-gray-500 uppercase tracking-wide font-medium">Identified so far</p>
+                <div className="px-4 pb-1">
+                  {FIELD_LABELS.map(({ key, label }) => {
+                    const value = getFieldDisplayValue(key, parseResult.fields);
+                    if (!value) return null;
+                    return (
+                      <div key={key} className="flex items-start gap-2 py-1.5 border-t border-gray-800 first:border-t-0">
+                        <span className="w-4 h-4 rounded-full bg-green-900 border border-green-700 flex items-center justify-center shrink-0 mt-0.5" aria-hidden="true">
+                          <svg xmlns="http://www.w3.org/2000/svg" className="w-2.5 h-2.5 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                        </span>
+                        <div className="flex flex-col min-w-0">
+                          <span className="text-xs text-gray-500">{label}</span>
+                          <span className="text-xs text-gray-300 leading-snug break-words" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' } as React.CSSProperties}>{value}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <p className="px-4 py-2.5 text-xs text-blue-400 border-t border-gray-800">
+                  Record more to add details or correct any of the above
+                </p>
               </div>
             ) : (
               <p className="text-sm text-gray-400 text-center">
