@@ -45,6 +45,8 @@ interface ParsedFields {
   priority?: string | null;
   projectId?: string | null;
   projectName?: string | null;
+  effort?: string | null;
+  aiAgentTakeCare?: boolean | null;
 }
 
 interface ParseVoiceResponse {
@@ -54,12 +56,17 @@ interface ParseVoiceResponse {
 
 // ── Field row config ───────────────────────────────────────────────────────
 
+// Core 5 fields that determine completeness
+const CORE_FIELD_KEYS: (keyof ParsedFields)[] = ['title', 'description', 'dateToWorkOn', 'priority', 'projectName'];
+
 const FIELD_LABELS: { key: keyof ParsedFields; label: string }[] = [
   { key: 'title', label: 'Title' },
   { key: 'description', label: 'Description' },
   { key: 'dateToWorkOn', label: 'Date to Work On' },
   { key: 'priority', label: 'Priority' },
   { key: 'projectName', label: 'Project' },
+  { key: 'effort', label: 'Effort' },
+  { key: 'aiAgentTakeCare', label: 'AI Agent Task' },
 ];
 
 // ── Spinner ────────────────────────────────────────────────────────────────
@@ -367,18 +374,28 @@ export default function VoiceDump() {
   // ── Results helpers ───────────────────────────────────────────────────────
 
   function countIdentified(fields: ParsedFields): number {
-    return FIELD_LABELS.filter(({ key }) => {
+    return CORE_FIELD_KEYS.filter((key) => {
       const val = fields[key];
       return val != null && val !== '';
     }).length;
   }
 
   function getFieldDisplayValue(key: keyof ParsedFields, fields: ParsedFields): string | null {
-    if (key === 'projectName') {
-      return fields.projectName ?? null;
-    }
+    if (key === 'projectName') return fields.projectName ?? null;
+    if (key === 'aiAgentTakeCare') return fields.aiAgentTakeCare ? 'Yes' : null;
     const val = fields[key];
-    return val != null ? String(val) : null;
+    return (val != null && val !== '') ? String(val) : null;
+  }
+
+  // Returns the existing value on the task card for a given field key, if present
+  function getOriginalCardValue(key: keyof ParsedFields, task: Task): string | null {
+    if (!task) return null;
+    if (key === 'priority') return task.priority ?? null;
+    if (key === 'dateToWorkOn') return task.dateToWorkOn ?? null;
+    if (key === 'projectName') return task.projectName ?? null;
+    if (key === 'effort') return task.effort ?? null;
+    if (key === 'aiAgentTakeCare') return task.aiAgentTakeCare ? 'Yes' : null;
+    return null;
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -568,7 +585,7 @@ export default function VoiceDump() {
             <div className="rounded-2xl bg-gray-900 border border-gray-800 overflow-hidden">
               <div className="px-4 py-3 border-b border-gray-800">
                 <p className="text-sm font-medium text-gray-200">
-                  {countIdentified(parseResult.fields)} of {FIELD_LABELS.length} fields identified
+                  {countIdentified(parseResult.fields)} of {CORE_FIELD_KEYS.length} fields identified
                 </p>
                 <p className="text-xs text-gray-500 mt-0.5">
                   AI Clean Up Status will be set to{' '}
@@ -582,6 +599,7 @@ export default function VoiceDump() {
                 {FIELD_LABELS.map(({ key, label }) => {
                   const value = getFieldDisplayValue(key, parseResult.fields);
                   const identified = value != null;
+                  const originalValue = !identified && currentTask ? getOriginalCardValue(key, currentTask) : null;
                   return (
                     <div key={key} className="flex items-start gap-3 px-4 py-3">
                       {identified ? (
@@ -600,7 +618,9 @@ export default function VoiceDump() {
                         {identified ? (
                           <span className="text-sm text-gray-200 leading-snug break-words">{value}</span>
                         ) : (
-                          <span className="text-sm text-gray-600 italic">not mentioned</span>
+                          <span className="text-sm text-gray-600 italic">
+                            not mentioned{originalValue ? <span className="text-gray-700"> · from original card</span> : null}
+                          </span>
                         )}
                       </div>
                     </div>
