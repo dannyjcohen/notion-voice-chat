@@ -49,7 +49,7 @@ Instructions:
 2. DESCRIPTION (always required): Summarize what the user said about this task. Always append the original task title at the very end, on its own line, prefixed with "Original: ".
 3. DATE TO WORK ON: If the user mentions a day of the week (e.g. "Monday") or a relative date (e.g. "next week"), resolve it to a specific YYYY-MM-DD date. ALWAYS choose the next future occurrence — never a date in the past or today. If no date is mentioned, omit this field.
 4. PRIORITY: Include only if the user explicitly mentions a priority level. Values: Urgent, High, Medium, Low.
-5. PROJECT: Always try to match to one of the available projects. Use any context clue — keywords, abbreviations, company names, product names, or topics mentioned. Partial/approximate matches are fine; make your best guess. Only omit if there is genuinely zero connection to any project.
+5. PROJECT MATCHES: Return a top-level "projectMatches" array (NOT inside "fields") containing up to 3 project IDs ordered from most to least likely. Use any context clue — keywords, abbreviations, company names, product names, topics. Partial/approximate matches are fine. Include all plausible candidates up to 3. Return an empty array only if there is genuinely zero connection to any project.
 6. EFFORT: Include only if the user explicitly mentions effort level. Values: High, Medium, Low.
 7. AI AGENT TAKE CARE:
    - Set to true if the user says AI/an agent should handle it ("AI can handle this", "have the agent do it", "delegate to AI", etc.).
@@ -58,23 +58,13 @@ Instructions:
 8. COMPLETENESS: Set to "complete" if dateToWorkOn AND priority are both present (title, description, and project are always generated so they don't affect completeness). Otherwise "partial".
 
 Return a JSON object in exactly this shape (example values shown):
-{
-  "fields": {
-    "title": "Review NCTC contract proposal",
-    "description": "User wants to review the contract before Tuesday's call.\n\nOriginal: nctc contract",
-    "dateToWorkOn": "2026-06-30",
-    "priority": "High",
-    "projectId": "abc-123",
-    "effort": "Medium",
-    "aiAgentTakeCare": true
-  },
-  "completeness": "complete"
-}
+{"fields":{"title":"Review NCTC contract proposal","description":"User wants to review the contract before Tuesday call. Original: nctc contract","dateToWorkOn":"2026-06-30","priority":"High","effort":"Medium","aiAgentTakeCare":false},"projectMatches":["abc-123","def-456","ghi-789"],"completeness":"complete"}
 
 Field rules:
 - "title" and "description" must always be present.
-- "dateToWorkOn", "priority", "projectId", "effort" — include only when applicable per the instructions above. If not applicable, omit the key entirely (do not include null or empty string).
-- "aiAgentTakeCare" — include true (AI handles it), false (user explicitly said they will do it), or omit entirely (not mentioned). Never omit when the user clearly stated who is doing the task.
+- "dateToWorkOn", "priority", "effort" — include only when applicable. If not applicable, omit the key entirely (do not include null or empty string).
+- "projectMatches" — top-level array of up to 3 project IDs (strings), most likely first. Do NOT put project inside "fields".
+- "aiAgentTakeCare" — include true (AI handles it), false (user explicitly said they will do it), or omit entirely (not mentioned).
 - "completeness" must be either "complete" or "partial".
 - Output only the JSON object. No explanation, no markdown fences.`;
 
@@ -97,7 +87,7 @@ Field rules:
       return '"' + inner.replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t') + '"';
     });
 
-    let parsed: { fields: Record<string, unknown>; completeness: 'complete' | 'partial' };
+    let parsed: { fields: Record<string, unknown>; completeness: 'complete' | 'partial'; projectMatches?: unknown };
     try {
       parsed = JSON.parse(raw);
     } catch {
@@ -106,7 +96,35 @@ Field rules:
       return Response.json({ error: `AI response could not be parsed as JSON. Raw: ${preview}` }, { status: 500 });
     }
 
-    return Response.json({ fields: parsed.fields ?? {}, completeness: parsed.completeness ?? 'partial' });
+    // Resolve projectMatches IDs → { id, name } objects, server-side
+    const rawMatchIds: string[] = Array.isArray(parsed.projectMatches)
+      ? (parsed.projectMatches as unknown[]).filter((x): x is string => typeof x === 'string')
+      : [];
+
+    // Also support legacy projectId in fields (graceful fallback)
+    const legacyId = typeof parsed.fields.projectId === 'string' ? parsed.fields.projectId : null;
+    const allCandidateIds = rawMatchIds.length > 0 ? rawMatchIds : (legacyId ? [legacyId] : []);
+
+    const projectMatches = allCandidateIds
+      .slice(0, 3)
+      .map((id) => projects.find((p) => p.id === id))
+      .filter((p): p is NotionProject => p != null)
+      .map((p) => ({ id: p.id, name: p.name }));
+
+    // Inject top match into fields so consumers can read projectId/projectName directly
+    if (projectMatches.length > 0) {
+      parsed.fields.projectId = projectMatches[0].id;
+      parsed.fields.projectName = projectMatches[0].name;
+    } else {
+      delete parsed.fields.projectId;
+      delete parsed.fields.projectName;
+    }
+
+    return Response.json({
+      fields: parsed.fields ?? {},
+      completeness: parsed.completeness ?? 'partial',
+      projectMatches,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[parse-voice] generateText error:', message);

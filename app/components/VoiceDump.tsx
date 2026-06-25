@@ -49,9 +49,15 @@ interface ParsedFields {
   aiAgentTakeCare?: boolean | null;
 }
 
+interface ProjectMatch {
+  id: string;
+  name: string;
+}
+
 interface ParseVoiceResponse {
   fields: ParsedFields;
   completeness: 'partial' | 'complete';
+  projectMatches?: ProjectMatch[];
 }
 
 // ── Field row config ───────────────────────────────────────────────────────
@@ -365,6 +371,23 @@ export default function VoiceDump() {
     // accumulatedTranscript is preserved; next recording appends to it
   }, []);
 
+  // ── Switch project match ──────────────────────────────────────────────────
+
+  const handleSwitchProject = useCallback((match: ProjectMatch) => {
+    setParseResult((prev) => {
+      if (!prev) return prev;
+      const reordered = [
+        match,
+        ...(prev.projectMatches?.filter((m) => m.id !== match.id) ?? []),
+      ];
+      return {
+        ...prev,
+        fields: { ...prev.fields, projectId: match.id, projectName: match.name },
+        projectMatches: reordered,
+      };
+    });
+  }, []);
+
   // ── Re-record (start over) — wipes everything ────────────────────────────
 
   const handleReRecord = useCallback(() => {
@@ -665,10 +688,27 @@ export default function VoiceDump() {
                           —
                         </span>
                       )}
-                      <div className="flex flex-col min-w-0">
+                      <div className="flex flex-col min-w-0 gap-0.5">
                         <span className="text-xs text-gray-500">{label}</span>
                         {identified ? (
-                          <span className="text-sm text-gray-200 leading-snug break-words">{value}</span>
+                          <>
+                            <span className="text-sm text-gray-200 leading-snug break-words">{value}</span>
+                            {/* Alternative project chips */}
+                            {key === 'projectName' && parseResult.projectMatches && parseResult.projectMatches.length > 1 && (
+                              <div className="flex flex-wrap gap-1.5 mt-1">
+                                {parseResult.projectMatches.slice(1).map((match, i) => (
+                                  <button
+                                    key={match.id}
+                                    onClick={() => handleSwitchProject(match)}
+                                    className="px-2 py-0.5 rounded text-xs bg-gray-800 border border-gray-700 text-gray-400 hover:border-blue-500 hover:text-blue-300 transition-colors"
+                                    aria-label={`Switch project to ${match.name}`}
+                                  >
+                                    {i + 2}. {match.name}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </>
                         ) : (
                           <span className="text-sm text-gray-600 italic">
                             not mentioned{originalValue ? <span className="text-gray-700"> · from original card</span> : null}
