@@ -248,18 +248,49 @@ export default function VoiceChat() {
   const fetchNextTask = useCallback(async (currentSkipList: string[]) => {
     const skipParam = currentSkipList.join(',');
     const url = `/api/tasks/next${skipParam ? `?skip=${encodeURIComponent(skipParam)}` : ''}`;
-    const startTime = logApiStart('/api/tasks/next');
-    const res = await fetch(url);
-    const data = await res.json() as { task: Task | null };
-    logApiEnd('/api/tasks/next', res.status, startTime);
-    if (!data.task) {
-      setSessionDone(true);
-      addMessage('assistant', 'All caught up — no more tasks to review!');
-      return;
+
+    if (debugMode) {
+      addDebugMessage(`📤 GET /api/tasks/next — skip list: ${currentSkipList.length ? currentSkipList.join(', ') : '(none)'}`);
     }
-    setCurrentTask(data.task);
-    addMessage('assistant', `Next task: **${data.task.title}**`);
-  }, [addMessage, logApiStart, logApiEnd]);
+
+    const startTime = logApiStart('/api/tasks/next');
+    try {
+      const res = await fetch(url);
+      const data = await res.json() as { task: Task | null };
+      const durationS = ((Date.now() - startTime) / 1000).toFixed(1);
+      logApiEnd('/api/tasks/next', res.status, startTime);
+
+      if (!data.task) {
+        if (debugMode) {
+          addDebugMessage(`📥 /api/tasks/next → ${res.status}  ${durationS}s — no more tasks`);
+        }
+        setSessionDone(true);
+        addMessage('assistant', 'All caught up — no more tasks to review!');
+        setVoiceStateLogged('unlocked');
+        return;
+      }
+
+      if (debugMode) {
+        const t = data.task;
+        addDebugMessage(
+          `📥 /api/tasks/next → ${res.status}  ${durationS}s — task: "${t.title}" (priority: ${t.priority ?? 'none'}, date: ${t.dateToWorkOn ?? 'none'})`
+        );
+      }
+
+      setCurrentTask(data.task);
+      addMessage('assistant', `Next task: **${data.task.title}**`);
+      setVoiceStateLogged('unlocked');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const durationS = ((Date.now() - startTime) / 1000).toFixed(1);
+      logApiEnd('/api/tasks/next', 0, startTime, message);
+      if (debugMode) {
+        addDebugMessage(`📥 /api/tasks/next → error  ${durationS}s — ${message}`);
+      }
+      addMessage('assistant', 'Failed to load next task — please try again.');
+      setVoiceStateLogged('unlocked');
+    }
+  }, [addMessage, debugMode, addDebugMessage, logApiStart, logApiEnd, setVoiceStateLogged]);
 
   // ── Handle AI response (JSON action or follow-up text) ───────────────────
 
@@ -316,6 +347,12 @@ export default function VoiceChat() {
 
   const loadSession = useCallback(async () => {
     log('loadSession: fetching projects + first task');
+
+    if (debugMode) {
+      addDebugMessage('📤 GET /api/projects — fetching project list');
+      addDebugMessage('📤 GET /api/tasks/next — skip list: (none)');
+    }
+
     const projectsStart = logApiStart('/api/projects');
     const tasksStart = logApiStart('/api/tasks/next');
     const [projectsRes, taskRes] = await Promise.all([
@@ -328,17 +365,37 @@ export default function VoiceChat() {
     const projectsData = await projectsRes.json() as { projects: Project[] };
     const taskData = await taskRes.json() as { task: Task | null };
 
+    const projectsDuration = ((Date.now() - projectsStart) / 1000).toFixed(1);
+    const tasksDuration = ((Date.now() - tasksStart) / 1000).toFixed(1);
+
+    if (debugMode) {
+      const names = (projectsData.projects ?? []).map((p) => p.name).join(', ');
+      addDebugMessage(
+        `📥 /api/projects → ${projectsRes.status}  ${projectsDuration}s — loaded ${projectsData.projects?.length ?? 0} projects: ${names || '(none)'}`
+      );
+    }
+
     setProjects(projectsData.projects ?? []);
 
     if (!taskData.task) {
+      if (debugMode) {
+        addDebugMessage(`📥 /api/tasks/next → ${taskRes.status}  ${tasksDuration}s — no more tasks`);
+      }
       setSessionDone(true);
       addMessage('assistant', 'All caught up — no more tasks to review!');
       return;
     }
 
+    if (debugMode) {
+      const t = taskData.task;
+      addDebugMessage(
+        `📥 /api/tasks/next → ${taskRes.status}  ${tasksDuration}s — task: "${t.title}" (priority: ${t.priority ?? 'none'}, date: ${t.dateToWorkOn ?? 'none'})`
+      );
+    }
+
     setCurrentTask(taskData.task);
     addMessage('assistant', `Let's get started. First task: **${taskData.task.title}**`);
-  }, [log, addMessage, logApiStart, logApiEnd]);
+  }, [log, addMessage, logApiStart, logApiEnd, debugMode, addDebugMessage]);
 
   // ── Confirm / cancel pending update ──────────────────────────────────────
 
@@ -347,6 +404,13 @@ export default function VoiceChat() {
     if (!pending) return;
     setPendingUpdate(null);
 
+    if (debugMode) {
+      const fieldsSummary = Object.entries(pending.fields)
+        .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
+        .join(', ');
+      addDebugMessage(`📤 POST /api/tasks/update — taskId: ${pending.taskId}\n   fields: {${fieldsSummary}}`);
+    }
+
     const startTime = logApiStart('/api/tasks/update');
     try {
       const res = await fetch('/api/tasks/update', {
@@ -354,15 +418,36 @@ export default function VoiceChat() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ taskId: pending.taskId, fields: pending.fields }),
       });
+      const durationS = ((Date.now() - startTime) / 1000).toFixed(1);
       logApiEnd('/api/tasks/update', res.status, startTime);
-      addMessage('assistant', 'Task updated!');
+
+      if (res.ok) {
+        if (debugMode) {
+          addDebugMessage(`📥 /api/tasks/update → ${res.status}  ${durationS}s — updated successfully`);
+        }
+        addMessage('assistant', 'Task updated!');
+      } else {
+        let errBody = '';
+        try { errBody = await res.text(); } catch { /* ignore */ }
+        if (debugMode) {
+          addDebugMessage(`📥 /api/tasks/update → ${res.status}  ${durationS}s — ${errBody.slice(0, 200) || 'error'}`);
+        }
+        addMessage('assistant', 'Update failed — please try again.');
+        return;
+      }
       await fetchNextTask(skipListRef.current);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      const durationS = ((Date.now() - startTime) / 1000).toFixed(1);
       logApiEnd('/api/tasks/update', 0, startTime, message);
+
+      if (debugMode) {
+        addDebugMessage(`📥 /api/tasks/update → error  ${durationS}s — ${message}`);
+      }
+
       addMessage('assistant', 'Update failed — please try again.');
     }
-  }, [addMessage, fetchNextTask, logApiStart, logApiEnd]);
+  }, [addMessage, fetchNextTask, logApiStart, logApiEnd, debugMode, addDebugMessage]);
 
   const handleCancelUpdate = useCallback(() => {
     setPendingUpdate(null);
@@ -382,6 +467,16 @@ export default function VoiceChat() {
     const startTime = logApiStart('/api/chat');
     log(`POST /api/chat (${msgs.length} msgs)`);
 
+    // Debug: request bubble
+    if (debugMode) {
+      const lastUserMsg = [...msgs].reverse().find((m) => m.role === 'user');
+      const lastUserPreview = lastUserMsg ? lastUserMsg.content.slice(0, 100) : '(none)';
+      const taskTitle = currentTaskRef.current?.title ?? '(no task)';
+      addDebugMessage(
+        `📤 POST /api/chat — ${msgs.length} messages, task: "${taskTitle}"\n   last user: "${lastUserPreview}"`
+      );
+    }
+
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
@@ -399,7 +494,7 @@ export default function VoiceChat() {
         const durationS = ((Date.now() - startTime) / 1000).toFixed(1);
         logApiEnd('/api/chat', response.status, startTime, errorPreview);
         if (debugMode) {
-          addDebugMessage(`/api/chat ${response.status} ${durationS}s — ${errorPreview ?? ''}`);
+          addDebugMessage(`📥 /api/chat → ${response.status}  ${durationS}s — ${errorPreview ?? 'error'}`);
         }
         setResponseText(
           response.status === 503
@@ -486,7 +581,28 @@ export default function VoiceChat() {
       logApiEnd('/api/chat', response.status, startTime, fullText.slice(0, 200));
       if (debugMode) {
         const durationS = ((Date.now() - startTime) / 1000).toFixed(1);
-        addDebugMessage(`/api/chat ${response.status} ${durationS}s`);
+        // Parse action type for richer response bubble
+        let actionSummary = '';
+        try {
+          let trimmedFull = fullText.trim();
+          const fenceMatch = trimmedFull.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
+          if (fenceMatch) trimmedFull = fenceMatch[1].trim();
+          if (!trimmedFull.startsWith('{')) {
+            const jsonMatch = trimmedFull.match(/\{[\s\S]*"action"[\s\S]*\}/);
+            if (jsonMatch) trimmedFull = jsonMatch[0];
+          }
+          const parsed = JSON.parse(trimmedFull) as { action?: string; summary?: string };
+          if (parsed.action === 'confirm') {
+            actionSummary = `action: confirm — ${(parsed.summary ?? '').slice(0, 200)}`;
+          } else if (parsed.action === 'skip') {
+            actionSummary = 'action: skip';
+          } else {
+            actionSummary = `action: ${parsed.action ?? 'unknown'}`;
+          }
+        } catch {
+          actionSummary = fullText.slice(0, 150);
+        }
+        addDebugMessage(`📥 /api/chat → ${response.status}  ${durationS}s — ${actionSummary}`);
       }
 
       // Detect JSON actions — don't add them to visible chat history
@@ -501,6 +617,16 @@ export default function VoiceChat() {
 
       // Handle AI action response (skip/update) or follow-up question
       await handleAIResponse(fullText);
+
+      // If no TTS was queued (e.g. JSON action with no summary, or empty response),
+      // ensure we don't stay stuck in 'processing'.
+      if (!ttsDrainingRef.current && ttsQueueRef.current.length === 0) {
+        if (vadActiveRef.current) {
+          setVoiceStateLogged('listening');
+        } else {
+          setVoiceStateLogged('unlocked');
+        }
+      }
 
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
