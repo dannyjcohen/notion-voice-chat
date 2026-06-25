@@ -4,6 +4,18 @@
 :root {
   --background: #030712; /* gray-950 */
   --foreground: #f9fafb; /* gray-50 */
+
+  /* Brand palette */
+  --navy: #050F24;
+  --navy-light: #041E56;
+  --blue: #0DA0E5;
+  --blue-dark: #0451A3;
+  --green: #5EE029;
+  --green-dark: #0B531F;
+  --white: #FFFFFF;
+  --off-white: #EAEFF5;
+  --glow-blue: rgba(13, 160, 229, 0.45);
+  --glow-green: rgba(94, 224, 41, 0.35);
 }
 
 @theme inline {

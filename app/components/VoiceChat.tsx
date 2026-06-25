@@ -92,23 +92,43 @@ function renderMarkdown(text: string): React.ReactNode[] {
   });
 }
 
-// ── TTS helpers (browser Web Speech API) ──────────────────────────────────
-// Instant, free, no network round-trip.
+// ── TTS voices ────────────────────────────────────────────────────────────
 
-function speakSentence(text: string): Promise<void> {
-  return new Promise((resolve) => {
-    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      resolve();
-      return;
-    }
-    const utt = new SpeechSynthesisUtterance(text);
-    utt.rate = 1.1;
-    utt.pitch = 1.0;
-    utt.volume = 1.0;
-    utt.onend = () => resolve();
-    utt.onerror = () => resolve();
-    window.speechSynthesis.speak(utt);
-  });
+const TTS_VOICES = [
+  { value: 'nova',    label: 'Nova (default)' },
+  { value: 'alloy',  label: 'Alloy' },
+  { value: 'echo',   label: 'Echo' },
+  { value: 'fable',  label: 'Fable' },
+  { value: 'onyx',   label: 'Onyx' },
+  { value: 'shimmer',label: 'Shimmer' },
+  { value: 'coral',  label: 'Coral' },
+  { value: 'sage',   label: 'Sage' },
+  { value: 'ash',    label: 'Ash' },
+] as const;
+
+// ── TTS via OpenAI /api/speak ──────────────────────────────────────────────
+
+async function speakSentence(text: string, voice: string): Promise<void> {
+  try {
+    const res = await fetch('/api/speak', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, voice }),
+    });
+    if (!res.ok || !res.body) return;
+    const arrayBuffer = await res.arrayBuffer();
+    const audioCtx = new AudioContext();
+    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+    return new Promise<void>((resolve) => {
+      const source = audioCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioCtx.destination);
+      source.onended = () => resolve();
+      source.start(0);
+    });
+  } catch {
+    // Non-fatal — silently skip if TTS fails
+  }
 }
 
 // ── Confirmation classifier ────────────────────────────────────────────────
@@ -140,6 +160,7 @@ export default function VoiceChat() {
   const [skipList, setSkipList] = useState<string[]>([]);
   const [sessionDone, setSessionDone] = useState(false);
   const [sessionStarted, setSessionStarted] = useState(false);
+  const [paused, setPaused] = useState(false);
   const [pendingUpdate, setPendingUpdate] = useState<PendingUpdate | null>(null);
 
   const [messages, setMessages] = useState<Message[]>([]);
@@ -177,6 +198,22 @@ export default function VoiceChat() {
   });
   const ttsEnabledRef = useRef(ttsEnabled);
   useEffect(() => { ttsEnabledRef.current = ttsEnabled; }, [ttsEnabled]);
+
+  const [ttsVoice, setTtsVoice] = useState<string>(() => {
+    if (typeof window === 'undefined') return 'nova';
+    return localStorage.getItem('ttsVoice') ?? 'nova';
+  });
+  const ttsVoiceRef = useRef(ttsVoice);
+  useEffect(() => { ttsVoiceRef.current = ttsVoice; }, [ttsVoice]);
+
+  const handleVoiceChange = useCallback((voice: string) => {
+    setTtsVoice(voice);
+    localStorage.setItem('ttsVoice', voice);
+  }, []);
+
+  const [projectsRefreshing, setProjectsRefreshing] = useState(false);
+
+  const [vadSpeaking, setVadSpeaking] = useState(false);
 
   const toggleTts = useCallback(() => {
     setTtsEnabled((prev) => {
@@ -239,16 +276,11 @@ export default function VoiceChat() {
     ttsDrainingRef.current = true;
     setVoiceStateLogged('speaking');
 
-    // Cancel any leftover speech before starting a new drain cycle
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-    }
-
     while (ttsQueueRef.current.length > 0) {
       const sentence = ttsQueueRef.current.shift()!;
       if (ttsEnabledRef.current) {
         log(`TTS: speaking "${sentence.slice(0, 30)}..."`);
-        await speakSentence(sentence);
+        await speakSentence(sentence, ttsVoiceRef.current);
       } else {
         log(`TTS: muted, skipping "${sentence.slice(0, 30)}..."`);
       }
@@ -399,6 +431,24 @@ export default function VoiceChat() {
       localStorage.setItem(PROJECTS_CACHE_KEY, JSON.stringify({ projects, cachedAt: Date.now() }));
     } catch { /* storage full or unavailable */ }
   }
+
+  const refreshProjects = useCallback(async () => {
+    if (projectsRefreshing) return;
+    setProjectsRefreshing(true);
+    try {
+      const res = await fetch('/api/projects');
+      const data = await res.json() as { projects: Project[] };
+      const fresh = data.projects ?? [];
+      setProjects(fresh);
+      cacheProjects(fresh);
+      log(`Projects refreshed: ${fresh.length} loaded`);
+    } catch (err) {
+      log(`Projects refresh failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setProjectsRefreshing(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectsRefreshing, log]);
 
   // ── Prefetch on mount (silent — no chat messages) ────────────────────────
   // Runs immediately when the page loads so data is ready before the user taps.
@@ -694,11 +744,9 @@ export default function VoiceChat() {
         if (!looksLikeAction) {
           setResponseText(fullText);
 
-          // Task B: speak after ~8 words OR any punctuation (whichever comes first)
-          // This lets Web Speech start immediately without waiting for a full sentence.
-          const wordCount = sentenceBuffer.split(/\s+/).filter(Boolean).length;
-          const hasPunctuation = /[.!?,;:]/.test(sentenceBuffer.slice(-1));
-          if (wordCount >= 8 || (hasPunctuation && wordCount >= 3)) {
+          // Only chunk on sentence endings (.!?) — avoids choppy mid-sentence splits
+          const hasSentenceEnd = /[.!?]/.test(sentenceBuffer.slice(-1));
+          if (hasSentenceEnd) {
             const chunk = sentenceBuffer.trim();
             sentenceBuffer = '';
             if (chunk && !isToolLine(chunk)) {
@@ -903,7 +951,15 @@ export default function VoiceChat() {
 
   const handleVADSpeechEnd = useCallback(
     async (audio: Float32Array) => {
+      setVadSpeaking(false);
       log('VAD speech end detected');
+
+      // Audio gate — skip clips that are too short (likely noise/breath)
+      if (audio.length < 4800) {
+        log(`VAD: clip too short (${audio.length} samples), skipping`);
+        return;
+      }
+
       const wavBlob = float32ArrayToWav(audio, 16000);
       const formData = new FormData();
       formData.append('audio', wavBlob, 'audio.wav');
@@ -961,7 +1017,18 @@ export default function VoiceChat() {
   const vad = useMicVAD({
     startOnLoad: false,
     onSpeechEnd: handleVADSpeechEnd,
-    onSpeechStart: () => { log('speech start detected'); },
+    onSpeechStart: () => {
+      log('speech start detected');
+      setVadSpeaking(true);
+    },
+    onVADMisfire: () => {
+      log('VAD misfire — resetting vadSpeaking');
+      setVadSpeaking(false);
+    },
+    positiveSpeechThreshold: 0.70,
+    negativeSpeechThreshold: 0.45,
+    minSpeechMs: 250,
+    redemptionMs: 600,
     baseAssetPath: '/',
     onnxWASMBasePath: '/',
   });
@@ -993,14 +1060,27 @@ export default function VoiceChat() {
       source.start(0);
     } catch { /* Non-fatal */ }
 
-    // Start VAD
+    // Start VAD — wait up to 5s for ONNX model to finish loading
     try {
+      if (vad.loading) {
+        log('VAD still loading ONNX model, waiting...');
+        await new Promise<void>((resolve, reject) => {
+          const deadline = Date.now() + 5000;
+          const poll = setInterval(() => {
+            if (!vad.loading) { clearInterval(poll); resolve(); }
+            else if (Date.now() > deadline) { clearInterval(poll); reject(new Error('VAD load timeout')); }
+          }, 100);
+        });
+      }
       await vad.start();
       vadActiveRef.current = true;
       setVoiceStateLogged('listening');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      log(`VAD start failed: ${message}`);
+      const hint = message.includes('Permission') || message.includes('permission')
+        ? ' (microphone permission denied — check browser settings)'
+        : '';
+      log(`VAD start failed: ${message}${hint}`);
       vadActiveRef.current = false;
       setHoldToSpeak(true);
     }
@@ -1018,6 +1098,50 @@ export default function VoiceChat() {
     // Data already prefetched — just show intro message
     loadSession();
   }, [voiceState, loadSession, setVoiceStateLogged, log]);
+
+  // ── Pause / Resume / End session ─────────────────────────────────────────
+
+  const handlePause = useCallback(() => {
+    log('session paused');
+    if (vadActiveRef.current) vad.pause();
+    ttsQueueRef.current = [];
+    ttsDrainingRef.current = false;
+    setPaused(true);
+    setVoiceStateLogged('unlocked');
+  }, [vad, setVoiceStateLogged, log]);
+
+  const handleResume = useCallback(async () => {
+    log('session resumed');
+    setPaused(false);
+    try {
+      await vad.start();
+      setVoiceStateLogged('listening');
+    } catch (err) {
+      log(`VAD restart failed: ${err instanceof Error ? err.message : String(err)}`);
+      setVoiceStateLogged('unlocked');
+    }
+  }, [vad, setVoiceStateLogged, log]);
+
+  const handleEndSession = useCallback(() => {
+    log('session ended');
+    if (vadActiveRef.current) vad.pause();
+    vadActiveRef.current = false;
+    ttsQueueRef.current = [];
+    ttsDrainingRef.current = false;
+    setVoiceStateLogged('idle');
+    setSessionStarted(false);
+    setSessionDone(false);
+    setPaused(false);
+    setMessages([]);
+    msgTimestampsRef.current = [];
+    setDebugMessages([]);
+    setCurrentTask(null);
+    setSkipList([]);
+    skipListRef.current = [];
+    setPendingUpdate(null);
+    setResponseText('');
+    setTranscriptFlash('');
+  }, [vad, setVoiceStateLogged, log]);
 
   // ── Pause/restart VAD around TTS ─────────────────────────────────────────
 
@@ -1063,38 +1187,46 @@ export default function VoiceChat() {
   if (voiceState === 'idle') {
     return (
       <>
-        <div className="flex flex-col items-center justify-center min-h-screen bg-gray-950 px-6">
-          <p className="text-gray-400 text-sm tracking-wide uppercase mb-10 font-medium">
-            Notion Task Review
+        <div
+          className="flex flex-col items-center justify-center min-h-screen px-6 bg-gray-950"
+        >
+          {/* App icon with green glow */}
+          <img
+            src="/app-icon.png"
+            alt="Notion Voice Chat"
+            width={90}
+            height={90}
+            className="mb-5 rounded-2xl"
+            style={{ boxShadow: '0 0 24px rgba(94, 224, 41, 0.35)' }}
+          />
+
+          {/* App title */}
+          <p
+            className="text-base font-light tracking-wide mb-10"
+            style={{ color: '#EAEFF5' }}
+          >
+            Notion Voice Chat
           </p>
 
+          {/* Tap to Begin button — Electric Blue pill with blue glow */}
           <button
             onClick={handleTap}
             aria-label="Tap to begin voice session"
-            className="relative flex items-center justify-center w-32 h-32 rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+            className="relative px-10 py-3.5 rounded-full text-white text-base font-medium tracking-wide focus:outline-none focus-visible:ring-2 focus-visible:ring-white transition-all"
+            style={{
+              background: '#0DA0E5',
+              boxShadow: '0 0 16px rgba(13, 160, 229, 0.45)',
+            }}
           >
-            <span className="absolute inset-0 rounded-full bg-white opacity-10 animate-ping" />
-            <span className="relative flex items-center justify-center w-32 h-32 rounded-full bg-white">
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="w-10 h-10 text-gray-950"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={1.8}
-                aria-hidden="true"
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 1a4 4 0 014 4v6a4 4 0 01-8 0V5a4 4 0 014-4z" />
-                <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-14 0M12 19v4M8 23h8" />
-              </svg>
-            </span>
+            Tap to Begin
           </button>
-
-          <p className="mt-8 text-gray-400 text-base">Tap to begin</p>
 
           <button
             onClick={handleTypeInstead}
-            className="mt-3 text-gray-600 text-sm hover:text-gray-400 transition-colors focus:outline-none focus-visible:underline"
+            className="mt-4 text-sm transition-colors focus:outline-none focus-visible:underline"
+            style={{ color: 'rgba(234, 239, 245, 0.45)' }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = 'rgba(234, 239, 245, 0.75)')}
+            onMouseLeave={(e) => (e.currentTarget.style.color = 'rgba(234, 239, 245, 0.45)')}
             aria-label="Skip microphone and type instead"
           >
             or type instead
@@ -1105,6 +1237,7 @@ export default function VoiceChat() {
           debugMode={debugMode}
           voiceState={voiceState}
           vadErrored={!!vad.errored}
+          vadLoading={vad.loading}
           vadListening={vad.listening}
           holdToSpeak={holdToSpeak}
           messageCount={messages.length}
@@ -1120,12 +1253,44 @@ export default function VoiceChat() {
 
   return (
     <>
-      <div className={`relative flex flex-col min-h-screen bg-gray-950 px-4 py-8 gap-4${debugMode ? ' pb-80' : ''}`}>
-        {/* TTS mute toggle */}
+      <div
+        className={`relative flex flex-col min-h-screen px-4 py-8 gap-4 bg-gray-950${debugMode ? ' pb-80' : ''}`}
+      >
+        {/* Top-left: voice dropdown + refresh projects button */}
+        <div className="absolute top-4 left-4 flex items-center gap-2">
+          <select
+            value={ttsVoice}
+            onChange={(e) => handleVoiceChange(e.target.value)}
+            className="text-xs bg-gray-800 border border-gray-700 text-gray-300 rounded-lg px-2 py-1.5 focus:outline-none focus:border-gray-500"
+            aria-label="TTS voice"
+          >
+            {TTS_VOICES.map((v) => (
+              <option key={v.value} value={v.value}>{v.label}</option>
+            ))}
+          </select>
+          <button
+            onClick={refreshProjects}
+            disabled={projectsRefreshing}
+            className="text-gray-500 hover:text-gray-300 transition-colors disabled:opacity-40"
+            aria-label="Refresh projects cache"
+            title="Refresh projects"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              className={`w-4 h-4${projectsRefreshing ? ' animate-spin' : ''}`}
+              fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}
+              aria-hidden="true"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Top-right: circular mute button */}
         <button
           onClick={toggleTts}
           aria-label={ttsEnabled ? 'Mute text-to-speech' : 'Unmute text-to-speech'}
-          className="absolute top-4 right-4 p-1.5 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          className="absolute top-4 right-4 w-10 h-10 flex items-center justify-center rounded-full bg-gray-800 text-gray-400 hover:text-gray-200 hover:bg-gray-700 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
         >
           {ttsEnabled ? (
             <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
@@ -1148,6 +1313,7 @@ export default function VoiceChat() {
             <div className="w-full max-w-lg h-36 rounded-2xl bg-gray-900 border border-gray-800 animate-pulse" />
           ) : currentTask ? (
             <TaskCard
+              id={currentTask.id}
               title={currentTask.title}
               priority={currentTask.priority}
               date={currentTask.dateToWorkOn}
@@ -1231,7 +1397,7 @@ export default function VoiceChat() {
             </div>
           )}
 
-          <StatusIndicator state={voiceState} />
+          <StatusIndicator state={voiceState} vadSpeaking={vadSpeaking} />
 
           {/* Text input bar */}
           <div className="flex w-full max-w-lg gap-2">
@@ -1271,6 +1437,45 @@ export default function VoiceChat() {
               Hold to speak
             </button>
           )}
+
+          {/* Pause / End session controls */}
+          {sessionStarted && !sessionDone && (
+            <div className="flex items-center gap-3 pt-1">
+              <button
+                onClick={paused ? handleResume : handlePause}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gray-800 border border-gray-700 text-gray-300 text-sm hover:bg-gray-700 transition-colors"
+                aria-label={paused ? 'Resume session' : 'Pause session'}
+              >
+                {paused ? (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                      <polygon points="5 3 19 12 5 21 5 3" />
+                    </svg>
+                    Resume
+                  </>
+                ) : (
+                  <>
+                    <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                      <line x1="6" y1="4" x2="6" y2="20" strokeLinecap="round" />
+                      <line x1="18" y1="4" x2="18" y2="20" strokeLinecap="round" />
+                    </svg>
+                    Pause
+                  </>
+                )}
+              </button>
+              <button
+                onClick={handleEndSession}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gray-800 border border-gray-700 text-gray-400 text-sm hover:bg-red-900/40 hover:text-red-300 hover:border-red-800 transition-colors"
+                aria-label="End session"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                  <line x1="18" y1="6" x2="6" y2="18" strokeLinecap="round" />
+                  <line x1="6" y1="6" x2="18" y2="18" strokeLinecap="round" />
+                </svg>
+                End Session
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -1278,6 +1483,7 @@ export default function VoiceChat() {
         debugMode={debugMode}
         voiceState={voiceState}
         vadErrored={!!vad.errored}
+        vadLoading={vad.loading}
         vadListening={vad.listening}
         holdToSpeak={holdToSpeak}
         messageCount={messages.length}

@@ -9,6 +9,7 @@ import {
 } from '@/lib/notion';
 import type { NotionTask, NotionProject } from '@/lib/notion';
 import { buildSystemPrompt, buildLegacySystemPrompt } from '@/lib/prompts';
+import { getEasternDateString, getEasternTomorrowString } from '@/lib/date';
 
 // ── Types for tool events ──────────────────────────────────────────────────
 type StreamPart =
@@ -37,7 +38,7 @@ export async function POST(request: Request) {
   };
 
   const { messages, currentTask = null, projects = [] } = body;
-  const today = new Date().toISOString().split('T')[0];
+  const today = getEasternDateString();
 
   // Build context-aware system prompt when task/projects are provided
   const systemPrompt =
@@ -122,9 +123,7 @@ function buildLegacyTools() {
       ),
       execute: async ({ taskId }: { taskId: string }) => {
         await skipTask(taskId);
-        const tomorrow = new Date();
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        const dateStr = tomorrow.toISOString().split('T')[0];
+        const dateStr = getEasternTomorrowString();
         return { success: true, message: `Task ${taskId} rescheduled to ${dateStr}.` };
       },
     },

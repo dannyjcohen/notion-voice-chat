@@ -14,6 +14,7 @@ interface DebugPanelProps {
   debugMode: boolean;
   voiceState: VoiceState;
   vadErrored: boolean;
+  vadLoading: boolean;
   vadListening: boolean;
   holdToSpeak: boolean;
   messageCount: number;
@@ -70,6 +71,7 @@ export default function DebugPanel({
   debugMode,
   voiceState,
   vadErrored,
+  vadLoading,
   vadListening,
   holdToSpeak,
   messageCount,
@@ -116,6 +118,10 @@ export default function DebugPanel({
           {vadErrored ? (
             <span className="px-2 py-0.5 rounded bg-red-900 text-red-300 text-[11px]">
               VAD errored
+            </span>
+          ) : vadLoading ? (
+            <span className="px-2 py-0.5 rounded bg-yellow-700 text-yellow-200 text-[11px]">
+              VAD loading…
             </span>
           ) : vadListening ? (
             <span className="px-2 py-0.5 rounded bg-green-900 text-green-300 text-[11px]">

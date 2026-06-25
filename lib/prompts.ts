@@ -35,7 +35,7 @@ Analyze the user's message and decide ONE of:
    {"action":"skip"}
 
 2. CONFIRM — User provided information about the task. Collect info, then present a confirmation.
-   Fields to fill: priority, dateToWorkOn (YYYY-MM-DD), status, description, effort, aiCleanUpStatus, projectId, aiAgentTakeCare
+   Fields to fill: title, priority, dateToWorkOn (YYYY-MM-DD), status, description, effort, aiCleanUpStatus, projectId, aiAgentTakeCare
 
    For projectId: match the task to the most appropriate project from the projects list based on the task title, description, and user's message. Use your best judgment.
    For aiAgentTakeCare: true if user says an AI agent should handle this, false if they'll do it themselves. Ask if not mentioned: "Will you handle this yourself or should an AI agent take care of it?"
@@ -43,7 +43,7 @@ Analyze the user's message and decide ONE of:
    If you're missing critical info, ask ONE focused follow-up question as plain text (not JSON). Keep it short — one sentence.
 
    When you have enough information (at minimum: description and either priority or dateToWorkOn), respond with ONLY this JSON:
-   {"action":"confirm","fields":{"priority":"...","dateToWorkOn":"...","status":"...","description":"...","effort":"...","aiCleanUpStatus":"Completed","projectId":"...","aiAgentTakeCare":false},"summary":"Here's what I'll update: [natural language summary covering all fields being set]. Ready to update?"}
+   {"action":"confirm","fields":{"title":"...","priority":"...","dateToWorkOn":"...","status":"...","description":"...","effort":"...","aiCleanUpStatus":"Completed","projectId":"...","aiAgentTakeCare":false},"summary":"Here's what I'll update: [natural language summary covering all fields being set]. Ready to update?"}
 
 IMPORTANT RULES:
 - When responding with action JSON, output ONLY the raw JSON object with NO markdown formatting, NO code blocks, NO backticks, NO extra text before or after
@@ -54,9 +54,15 @@ IMPORTANT RULES:
 - For dateToWorkOn: if user says "tomorrow" calculate from today's date
 - For priority: normalize to one of: Urgent, High, Medium, Low
 - For effort: normalize to one of: High, Medium, Low
-- For status: normalize to one of: Backlog, Blocked, On Deck, Scheduled, Today, Icebox, In Progress, Pending, Approved, Ongoing, In Review, Completed
-- The summary field should be one readable sentence covering all fields being set (e.g. "I'll set description to 'Fix the login bug', priority High, date June 25, effort Medium, project MyBundle, AI agent task: no.")
-- Today's date: ${today}`;
+- For status: normalize to one of: Backlog, On Deck, In Progress, In Review, Icebox, Completed
+- The summary field should be one readable sentence covering all fields being set (e.g. "I'll set title to 'Fix the login bug on mobile', description to '...', priority High, date June 25, effort Medium, project MyBundle, AI agent task: no.")
+- Today's date: ${today}
+
+TITLE UPDATES:
+- Always rewrite the title into action-oriented task format (e.g. "Churn analysis" → "Run the churn analysis" or "Add churn analysis report to dashboard")
+- The title should describe the specific action to take, not just the topic
+- When updating the title, append to the description: "\\n\\nOriginal title: [original title here]"
+- If the description already has content, append after it; if empty, the original title note can stand alone`;
 }
 
 // ── Prompt variable legend ─────────────────────────────────────────────────

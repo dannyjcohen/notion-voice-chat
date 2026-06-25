@@ -1,4 +1,5 @@
 import { Client } from '@notionhq/client';
+import { getEasternTomorrowString } from './date';
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY ?? '' });
 const DB_ID = process.env.NOTION_TASK_DB_ID ?? 'e7870227f50445e49d23e78958bbe61b';
@@ -51,9 +52,10 @@ export async function getNextTask(): Promise<NotionTask | null> {
  * Fetch the next unreviewed task, excluding any task IDs in the skip list.
  *
  * Filter logic:
- *   (Assigned contains Danny OR Status = Icebox)
+ *   Assigned contains Danny
  *   AND Status != Completed
  *   AND Status != In Review
+ *   AND Status != Icebox
  *   AND AI Clean Up Status != Completed
  *   AND AI Clean Up Status != In Progress
  *
@@ -66,20 +68,10 @@ export async function getNextTaskDirect(skipIds: string[]): Promise<NotionTask |
     filter: {
       and: [
         {
-          or: [
-            {
-              property: 'Assigned',
-              people: {
-                contains: DANNY_NOTION_USER_ID,
-              },
-            },
-            {
-              property: 'Status',
-              status: {
-                equals: 'Icebox',
-              },
-            },
-          ],
+          property: 'Assigned',
+          people: {
+            contains: DANNY_NOTION_USER_ID,
+          },
         },
         {
           property: 'Status',
@@ -91,6 +83,12 @@ export async function getNextTaskDirect(skipIds: string[]): Promise<NotionTask |
           property: 'Status',
           status: {
             does_not_equal: 'In Review',
+          },
+        },
+        {
+          property: 'Status',
+          status: {
+            does_not_equal: 'Icebox',
           },
         },
         {
@@ -235,6 +233,7 @@ export async function getAllProjects(): Promise<NotionProject[]> {
 export async function updateTask(
   taskId: string,
   fields: {
+    title?: string;
     priority?: string;
     dateToWorkOn?: string;
     status?: string;
@@ -247,6 +246,12 @@ export async function updateTask(
 ): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const properties: Record<string, any> = {};
+
+  if (fields.title != null) {
+    properties['Task'] = {
+      title: [{ text: { content: fields.title } }],
+    };
+  }
 
   if (fields.priority != null) {
     properties['Priority'] = { select: { name: fields.priority } };
@@ -305,9 +310,7 @@ export async function markTaskDone(taskId: string): Promise<void> {
 }
 
 export async function skipTask(taskId: string): Promise<void> {
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const dateStr = tomorrow.toISOString().split('T')[0];
+  const dateStr = getEasternTomorrowString();
 
   await notion.pages.update({
     page_id: taskId,

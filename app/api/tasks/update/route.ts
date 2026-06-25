@@ -5,6 +5,7 @@ export async function POST(request: Request) {
     const body = await request.json() as {
       taskId: string;
       fields: {
+        title?: string;
         priority?: string;
         dateToWorkOn?: string;
         status?: string;

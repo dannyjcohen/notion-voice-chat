@@ -2,22 +2,26 @@ type VoiceState = 'idle' | 'unlocked' | 'listening' | 'processing' | 'speaking';
 
 interface StatusIndicatorProps {
   state: VoiceState;
+  vadSpeaking?: boolean;
 }
 
-export default function StatusIndicator({ state }: StatusIndicatorProps) {
+export default function StatusIndicator({ state, vadSpeaking = false }: StatusIndicatorProps) {
   if (state === 'idle') {
     return null;
   }
 
   if (state === 'listening') {
     return (
-      <div className="flex items-center gap-2" role="status" aria-label="Listening">
-        {/* Pulse rings */}
+      <div className="flex items-center gap-2" role="status" aria-label={vadSpeaking ? 'Speech detected' : 'Listening'}>
         <div className="relative flex items-center justify-center w-10 h-10">
-          <span className="absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-60 animate-ping" />
-          <span className="relative inline-flex rounded-full h-4 w-4 bg-red-500" />
+          {/* Ping ring — only when VAD actively detects voice */}
+          {vadSpeaking && (
+            <span className="absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-60 animate-ping" />
+          )}
+          {/* Center dot — calm grey when waiting, red when detecting */}
+          <span className={`relative inline-flex rounded-full h-4 w-4 transition-colors duration-150 ${vadSpeaking ? 'bg-red-500' : 'bg-gray-600'}`} />
         </div>
-        <span className="text-gray-400 text-sm">Listening…</span>
+        <span className="text-gray-400 text-sm">{vadSpeaking ? 'Detecting speech…' : 'Listening…'}</span>
       </div>
     );
   }
