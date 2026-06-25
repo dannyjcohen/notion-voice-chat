@@ -92,27 +92,41 @@ function renderMarkdown(text: string): React.ReactNode[] {
   });
 }
 
-// ── TTS helpers ────────────────────────────────────────────────────────────
+// ── TTS helpers (browser Web Speech API) ──────────────────────────────────
+// Instant, free, no network round-trip.
 
-async function speakSentence(text: string): Promise<void> {
-  try {
-    const res = await fetch('/api/speak', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
-    });
-    if (!res.ok) return;
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    return new Promise((resolve) => {
-      audio.onended = () => { URL.revokeObjectURL(url); resolve(); };
-      audio.onerror = () => { URL.revokeObjectURL(url); resolve(); };
-      audio.play().catch(() => resolve());
-    });
-  } catch {
-    // Non-fatal — continue without audio
-  }
+function speakSentence(text: string): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      resolve();
+      return;
+    }
+    const utt = new SpeechSynthesisUtterance(text);
+    utt.rate = 1.1;
+    utt.pitch = 1.0;
+    utt.volume = 1.0;
+    utt.onend = () => resolve();
+    utt.onerror = () => resolve();
+    window.speechSynthesis.speak(utt);
+  });
+}
+
+// ── Confirmation classifier ────────────────────────────────────────────────
+
+function classifyConfirmation(text: string): 'yes' | 'no' | 'other' {
+  const lower = text.toLowerCase().trim();
+  const YES = [
+    'yes', 'yeah', 'yep', 'yup', 'sure', 'ok', 'okay', 'do it',
+    'update', 'confirm', 'go ahead', 'looks good', 'correct',
+    'perfect', 'sounds good', "that's right", 'great',
+  ];
+  const NO = [
+    'no', 'nope', 'cancel', 'wait', 'stop', 'change',
+    'actually', 'wrong', 'not right', 'hold on', 'never mind',
+  ];
+  if (YES.some((w) => lower.includes(w))) return 'yes';
+  if (NO.some((w) => lower.includes(w))) return 'no';
+  return 'other';
 }
 
 // ── Main component ─────────────────────────────────────────────────────────
@@ -225,6 +239,11 @@ export default function VoiceChat() {
     ttsDrainingRef.current = true;
     setVoiceStateLogged('speaking');
 
+    // Cancel any leftover speech before starting a new drain cycle
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+
     while (ttsQueueRef.current.length > 0) {
       const sentence = ttsQueueRef.current.shift()!;
       if (ttsEnabledRef.current) {
@@ -265,6 +284,11 @@ export default function VoiceChat() {
           addDebugMessage(`📥 /api/tasks/next → ${res.status}  ${durationS}s — no more tasks`);
         }
         setSessionDone(true);
+        // Task D: clear context before showing all-done message
+        setMessages([]);
+        msgTimestampsRef.current = [];
+        setDebugMessages([]);
+        setPendingUpdate(null);
         addMessage('assistant', 'All caught up — no more tasks to review!');
         setVoiceStateLogged('unlocked');
         return;
@@ -277,8 +301,20 @@ export default function VoiceChat() {
         );
       }
 
+      // Task D: clear message history so each task gets a clean slate
+      setMessages([]);
+      msgTimestampsRef.current = [];
+      setDebugMessages([]);
+      setPendingUpdate(null);
+
       setCurrentTask(data.task);
-      addMessage('assistant', `Next task: **${data.task.title}**`);
+      const taskTitle = data.task.title;
+      addMessage('assistant', `Next task: **${taskTitle}**`);
+
+      // Task C: speak the new task title aloud
+      ttsQueueRef.current.push(`Next task: ${taskTitle}`);
+      if (!ttsDrainingRef.current) drainTtsQueue();
+
       setVoiceStateLogged('unlocked');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -290,7 +326,7 @@ export default function VoiceChat() {
       addMessage('assistant', 'Failed to load next task — please try again.');
       setVoiceStateLogged('unlocked');
     }
-  }, [addMessage, debugMode, addDebugMessage, logApiStart, logApiEnd, setVoiceStateLogged]);
+  }, [addMessage, debugMode, addDebugMessage, logApiStart, logApiEnd, setVoiceStateLogged, drainTtsQueue]);
 
   // ── Handle AI response (JSON action or follow-up text) ───────────────────
 
@@ -462,22 +498,41 @@ export default function VoiceChat() {
     // Read from ref, not state — avoids stale closure if the user taps before
     // the prefetch useEffect's setCurrentTask re-render has propagated.
     const task = currentTaskRef.current;
+
+    const speakIntro = (title: string) => {
+      const msg = `Let's get started. First task: ${title}`;
+      ttsQueueRef.current.push(msg);
+      if (!ttsDrainingRef.current) drainTtsQueue();
+    };
+
     if (task) {
       addMessage('assistant', `Let's get started. First task: **${task.title}**`);
+      speakIntro(task.title);
     } else if (sessionDone) {
       addMessage('assistant', 'All caught up — no more tasks to review!');
     } else {
-      // Prefetch still in flight — poll the ref briefly then show the message
+      // Prefetch still in flight — show a placeholder so the chat area appears,
+      // then replace it once the task arrives.
+      addMessage('assistant', 'Loading your first task...');
       const wait = setInterval(() => {
         if (currentTaskRef.current) {
           clearInterval(wait);
-          addMessage('assistant', `Let's get started. First task: **${currentTaskRef.current.title}**`);
+          const t = currentTaskRef.current;
+          // Replace placeholder with real intro
+          setMessages((prev) => {
+            const idx = prev.findIndex((m) => m.content === 'Loading your first task...');
+            if (idx === -1) return [...prev, { role: 'assistant', content: `Let's get started. First task: **${t.title}**` }];
+            const next = [...prev];
+            next[idx] = { role: 'assistant', content: `Let's get started. First task: **${t.title}**` };
+            return next;
+          });
+          speakIntro(t.title);
         }
       }, 100);
-      // Give up after 5 seconds (session done or genuine no-task state)
-      setTimeout(() => clearInterval(wait), 5000);
+      // Give up after 10 seconds (session done or genuine no-task state)
+      setTimeout(() => clearInterval(wait), 10000);
     }
-  }, [sessionDone, addMessage]); // currentTask removed from deps — using ref instead
+  }, [sessionDone, addMessage, drainTtsQueue]); // currentTask removed from deps — using ref instead
 
   // ── Confirm / cancel pending update ──────────────────────────────────────
 
@@ -639,20 +694,22 @@ export default function VoiceChat() {
         if (!looksLikeAction) {
           setResponseText(fullText);
 
-          const sentences = sentenceBuffer.match(/[^.!?]+[.!?]+/g) ?? [];
-          for (const s of sentences) {
-            const trimmed = s.trim();
-            if (trimmed && !isToolLine(trimmed)) {
-              ttsQueueRef.current.push(trimmed);
+          // Task B: speak after ~8 words OR any punctuation (whichever comes first)
+          // This lets Web Speech start immediately without waiting for a full sentence.
+          const wordCount = sentenceBuffer.split(/\s+/).filter(Boolean).length;
+          const hasPunctuation = /[.!?,;:]/.test(sentenceBuffer.slice(-1));
+          if (wordCount >= 8 || (hasPunctuation && wordCount >= 3)) {
+            const chunk = sentenceBuffer.trim();
+            sentenceBuffer = '';
+            if (chunk && !isToolLine(chunk)) {
+              ttsQueueRef.current.push(chunk);
+              if (!ttsDrainingRef.current) drainTtsQueue();
             }
-          }
-          if (sentences.length > 0) {
-            sentenceBuffer = sentenceBuffer.replace(/[\s\S]*[.!?]+/, '');
-            if (!ttsDrainingRef.current) drainTtsQueue();
           }
         }
       }
 
+      // Flush any leftover buffer after stream ends
       const remaining = sentenceBuffer.trim();
       const looksLikeActionFinal = fullText.trimStart().startsWith('{') || fullText.trimStart().startsWith('```');
       if (remaining && !isToolLine(remaining) && !looksLikeActionFinal) {
@@ -731,9 +788,21 @@ export default function VoiceChat() {
 
     setTextInput('');
 
-    // If there's a pending confirmation and user types a follow-up,
-    // clear the pending state and pass the pending fields as context
+    // Task E: intercept message when a confirmation is pending
     const pending = pendingUpdateRef.current;
+    if (pending) {
+      const intent = classifyConfirmation(text);
+      if (intent === 'yes') {
+        handleConfirmUpdate();
+        return;
+      } else if (intent === 'no') {
+        handleCancelUpdate();
+        return;
+      }
+      // 'other' — fall through to AI with pending fields as context
+    }
+
+    // Pass pending fields as context for 'other' intent (or no pending update)
     let messageContent = text;
     if (pending) {
       setPendingUpdate(null);
@@ -745,7 +814,7 @@ export default function VoiceChat() {
     const updated = [...messages, newMessage];
     pushMessages([displayMessage]);
     sendMessages(updated);
-  }, [textInput, voiceState, messages, sendMessages, pushMessages, sessionDone]);
+  }, [textInput, voiceState, messages, sendMessages, pushMessages, sessionDone, handleConfirmUpdate, handleCancelUpdate]);
 
   const handleTextKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -781,8 +850,21 @@ export default function VoiceChat() {
           if (transcript.trim()) {
             if (debugMode) addDebugMessage(`Transcribed: "${transcript}"`);
             showTranscriptFlash(transcript);
-            // Inject pending update context if user speaks while confirmation is pending
+
+            // Task E: intercept hold-to-speak transcript when confirmation is pending
             const pending = pendingUpdateRef.current;
+            if (pending) {
+              const intent = classifyConfirmation(transcript);
+              if (intent === 'yes') {
+                handleConfirmUpdate();
+                return;
+              } else if (intent === 'no') {
+                handleCancelUpdate();
+                return;
+              }
+              // 'other' — fall through with pending fields as context
+            }
+
             let messageContent = transcript;
             if (pending) {
               setPendingUpdate(null);
@@ -810,7 +892,7 @@ export default function VoiceChat() {
       const message = err instanceof Error ? err.message : String(err);
       log(`hold-to-speak mic error: ${message}`);
     }
-  }, [messages, sendMessages, setVoiceStateLogged, log, logApiStart, logApiEnd, showTranscriptFlash, debugMode, addDebugMessage, pushMessages]);
+  }, [messages, sendMessages, setVoiceStateLogged, log, logApiStart, logApiEnd, showTranscriptFlash, debugMode, addDebugMessage, pushMessages, handleConfirmUpdate, handleCancelUpdate]);
 
   const stopHoldRecord = useCallback(() => {
     mediaRecorderRef.current?.stop();
@@ -836,8 +918,21 @@ export default function VoiceChat() {
         if (transcript.trim()) {
           if (debugMode) addDebugMessage(`Transcribed: "${transcript}"`);
           showTranscriptFlash(transcript);
-          // Inject pending update context if user speaks while confirmation is pending
+
+          // Task E: intercept VAD transcript when confirmation is pending
           const pending = pendingUpdateRef.current;
+          if (pending) {
+            const intent = classifyConfirmation(transcript);
+            if (intent === 'yes') {
+              handleConfirmUpdate();
+              return;
+            } else if (intent === 'no') {
+              handleCancelUpdate();
+              return;
+            }
+            // 'other' — fall through with pending fields as context
+          }
+
           let messageContent = transcript;
           if (pending) {
             setPendingUpdate(null);
@@ -858,7 +953,7 @@ export default function VoiceChat() {
         setVoiceStateLogged('listening');
       }
     },
-    [messages, sendMessages, setVoiceStateLogged, log, logApiStart, logApiEnd, showTranscriptFlash, debugMode, addDebugMessage, pushMessages]
+    [messages, sendMessages, setVoiceStateLogged, log, logApiStart, logApiEnd, showTranscriptFlash, debugMode, addDebugMessage, pushMessages, handleConfirmUpdate, handleCancelUpdate]
   );
 
   // ── VAD hook ──────────────────────────────────────────────────────────────
@@ -1115,30 +1210,10 @@ export default function VoiceChat() {
               </div>
             )}
 
-            {/* Confirmation buttons — shown after AI returns a confirm action */}
+            {/* Pending update hint — user confirms by saying/typing "yes" or "no" */}
             {pendingUpdate && (
-              <div className="flex gap-2 pt-1">
-                <button
-                  onClick={handleConfirmUpdate}
-                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-green-700 hover:bg-green-600 text-white text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400"
-                  aria-label="Confirm update"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
-                    <polyline points="20 6 9 17 4 12" />
-                  </svg>
-                  Update
-                </button>
-                <button
-                  onClick={handleCancelUpdate}
-                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400"
-                  aria-label="Cancel update"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} aria-hidden="true">
-                    <line x1="18" y1="6" x2="6" y2="18" />
-                    <line x1="6" y1="6" x2="18" y2="18" />
-                  </svg>
-                  Cancel
-                </button>
+              <div className="px-3 py-2 rounded-xl bg-gray-900 border border-gray-700 text-gray-400 text-xs text-center">
+                Say or type <span className="text-green-400 font-medium">"yes"</span> to update, or <span className="text-red-400 font-medium">"no"</span> / a correction to revise.
               </div>
             )}
           </div>

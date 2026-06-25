@@ -248,40 +248,40 @@ export async function updateTask(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const properties: Record<string, any> = {};
 
-  if (fields.priority !== undefined) {
+  if (fields.priority != null) {
     properties['Priority'] = { select: { name: fields.priority } };
   }
 
-  if (fields.dateToWorkOn !== undefined) {
+  if (fields.dateToWorkOn != null) {
     properties['Date To Work On'] = { date: { start: fields.dateToWorkOn } };
   }
 
-  if (fields.status !== undefined) {
+  if (fields.status != null) {
     // Status is a "status" type in Notion (not "select")
     properties['Status'] = { status: { name: fields.status } };
   }
 
-  if (fields.description !== undefined) {
+  if (fields.description != null) {
     properties['Description'] = {
       rich_text: [{ text: { content: fields.description } }],
     };
   }
 
-  if (fields.effort !== undefined) {
+  if (fields.effort != null) {
     properties['Effort'] = { select: { name: fields.effort } };
   }
 
-  if (fields.aiCleanUpStatus !== undefined) {
+  if (fields.aiCleanUpStatus != null) {
     properties['AI Clean Up Status'] = { select: { name: fields.aiCleanUpStatus } };
   }
 
-  if (fields.projectId !== undefined) {
+  if (fields.projectId != null) {
     properties['Projects'] = {
       relation: [{ id: fields.projectId }],
     };
   }
 
-  if (fields.aiAgentTakeCare !== undefined) {
+  if (fields.aiAgentTakeCare != null) {
     properties['AI Agent Take Care'] = { checkbox: fields.aiAgentTakeCare };
   }
 
