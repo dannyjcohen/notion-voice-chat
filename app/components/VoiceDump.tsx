@@ -114,6 +114,7 @@ export default function VoiceDump() {
 
   // Processing state
   const [transcript, setTranscript] = useState('');
+  const [accumulatedTranscript, setAccumulatedTranscript] = useState('');
   const [parseResult, setParseResult] = useState<ParseVoiceResponse | null>(null);
 
   // Skip list — initialized from localStorage
@@ -124,6 +125,7 @@ export default function VoiceDump() {
   const fetchNextTask = useCallback(async (currentSkipList: string[]) => {
     setPageState('loading');
     setTranscript('');
+    setAccumulatedTranscript('');
     setParseResult(null);
 
     const skipParam = currentSkipList.join(',');
@@ -273,13 +275,20 @@ export default function VoiceDump() {
           return;
         }
 
+        // Accumulate: if we already have a transcript from a previous recording,
+        // append this one as a follow-up so parse-voice gets full context.
+        const fullTranscript = accumulatedTranscript
+          ? `${accumulatedTranscript}\n\n[Follow-up:]\n${text}`
+          : text;
+        setAccumulatedTranscript(fullTranscript);
+
         // Send to parse-voice
         setPageState('parsing');
         const task = currentTask;
         const parseRes = await fetch('/api/parse-voice', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ transcript: text, task, projects }),
+          body: JSON.stringify({ transcript: fullTranscript, task, projects }),
         });
         if (!parseRes.ok) {
           let detail = '';
@@ -298,7 +307,7 @@ export default function VoiceDump() {
 
     recorder.stop();
     mediaRecorderRef.current = null;
-  }, [currentTask, projects]);
+  }, [currentTask, projects, accumulatedTranscript]);
 
   // ── Apply ─────────────────────────────────────────────────────────────────
 
@@ -346,10 +355,18 @@ export default function VoiceDump() {
     await fetchNextTask(newSkipList);
   }, [currentTask, skipList, fetchNextTask]);
 
-  // ── Re-record ─────────────────────────────────────────────────────────────
+  // ── Add details / fix — go back to idle keeping accumulated context ────────
+
+  const handleAddDetails = useCallback(() => {
+    setPageState('idle');
+    // accumulatedTranscript is preserved; next recording appends to it
+  }, []);
+
+  // ── Re-record (start over) — wipes everything ────────────────────────────
 
   const handleReRecord = useCallback(() => {
     setTranscript('');
+    setAccumulatedTranscript('');
     setParseResult(null);
     setPageState('idle');
   }, []);
@@ -489,9 +506,15 @@ export default function VoiceDump() {
         {/* Idle — ready to record */}
         {pageState === 'idle' && currentTask && (
           <div className="flex flex-col items-center gap-4 w-full">
-            <p className="text-sm text-gray-400 text-center">
-              Tap to record your notes about this task. Talk as long as you need.
-            </p>
+            {accumulatedTranscript ? (
+              <div className="w-full px-4 py-2.5 rounded-xl bg-blue-950 border border-blue-800 text-xs text-blue-300 text-center leading-relaxed">
+                Previous recording captured — add more details or correct what I got wrong
+              </div>
+            ) : (
+              <p className="text-sm text-gray-400 text-center">
+                Tap to record your notes about this task. Talk as long as you need.
+              </p>
+            )}
             <button
               onClick={startRecording}
               className="flex items-center gap-2.5 px-8 py-3.5 rounded-full text-white text-base font-medium tracking-wide transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
@@ -573,11 +596,11 @@ export default function VoiceDump() {
         {/* Results */}
         {pageState === 'results' && parseResult && (
           <div className="flex flex-col gap-4 w-full">
-            {/* Transcript */}
-            {transcript && (
+            {/* Transcript — show full accumulated text */}
+            {accumulatedTranscript && (
               <div className="px-4 py-3 rounded-xl bg-gray-900 border border-gray-800">
                 <p className="text-xs text-gray-500 mb-1">Transcript</p>
-                <p className="text-sm text-gray-300 leading-relaxed">{transcript}</p>
+                <p className="text-sm text-gray-300 leading-relaxed whitespace-pre-wrap">{accumulatedTranscript}</p>
               </div>
             )}
 
@@ -635,24 +658,35 @@ export default function VoiceDump() {
                 onClick={handleApply}
                 className="w-full px-6 py-3 rounded-xl font-medium text-white text-sm transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-green-400"
                 style={{ background: '#16a34a', boxShadow: '0 0 12px rgba(22, 163, 74, 0.3)' }}
-                aria-label="Apply identified fields to Notion"
+                aria-label="Apply identified fields to Notion and move to next task"
               >
-                Apply
+                Apply &amp; Next
               </button>
               <button
-                onClick={handleReRecord}
-                className="w-full px-6 py-3 rounded-xl bg-gray-800 border border-gray-700 text-gray-200 text-sm hover:bg-gray-700 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400"
-                aria-label="Re-record your voice note"
+                onClick={handleAddDetails}
+                className="w-full px-6 py-3 rounded-xl border text-sm font-medium transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+                style={{ background: 'rgba(13, 160, 229, 0.08)', borderColor: 'rgba(13, 160, 229, 0.35)', color: '#7dd3fc' }}
+                aria-label="Record more to add details or correct wrong fields"
               >
-                Re-record
+                Add Details / Fix
               </button>
-              <button
-                onClick={handleSkip}
-                className="text-sm text-gray-500 hover:text-gray-300 transition-colors focus:outline-none focus-visible:underline"
-                aria-label="Skip this task"
-              >
-                Skip
-              </button>
+              <div className="flex items-center gap-4 pt-1">
+                <button
+                  onClick={handleReRecord}
+                  className="text-sm text-gray-500 hover:text-gray-300 transition-colors focus:outline-none focus-visible:underline"
+                  aria-label="Start over with a completely fresh recording"
+                >
+                  Start Over
+                </button>
+                <span className="text-gray-700 text-xs select-none">·</span>
+                <button
+                  onClick={handleSkip}
+                  className="text-sm text-gray-500 hover:text-gray-300 transition-colors focus:outline-none focus-visible:underline"
+                  aria-label="Skip this task"
+                >
+                  Skip
+                </button>
+              </div>
             </div>
           </div>
         )}
