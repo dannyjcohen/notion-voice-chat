@@ -47,7 +47,7 @@ Transcript:
 Instructions:
 1. TITLE (always required): Write a concise imperative action statement describing what needs to be done (e.g. "Set up project timeline for NCTC"). Never use the original title as-is.
 2. DESCRIPTION (always required): Summarize what the user said about this task. Always append the original task title at the very end, on its own line, prefixed with "Original: ".
-3. DATE TO WORK ON: If the user mentions a day of the week (e.g. "Monday") or a relative date (e.g. "next week"), resolve it to a specific YYYY-MM-DD date. ALWAYS choose the next future occurrence — never a date in the past or today. If no date is mentioned, omit this field.
+3. DATE TO WORK ON: If the user mentions a day of the week (e.g. "Monday") or a relative date, resolve it to a specific YYYY-MM-DD date. Rules: (a) A named day like "Monday" means the next future Monday — never today, never a past date. (b) "Next week" means the Monday of next calendar week. (c) "This week" means the Monday of the current calendar week (or the next weekday if Monday has passed). (d) "Next month" means the 1st of next month. If no date is mentioned, omit this field.
 4. PRIORITY: Include only if the user explicitly mentions a priority level. Values: Urgent, High, Medium, Low.
 5. PROJECT MATCHES: Return a top-level "projectMatches" array (NOT inside "fields") containing up to 3 project IDs ordered from most to least likely. Use any context clue — keywords, abbreviations, company names, product names, topics. Partial/approximate matches are fine. Include all plausible candidates up to 3. Return an empty array only if there is genuinely zero connection to any project.
 6. EFFORT: Include only if the user explicitly mentions effort level. Values: High, Medium, Low.
