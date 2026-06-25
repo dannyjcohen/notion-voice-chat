@@ -107,17 +107,22 @@ const TTS_VOICES = [
 ] as const;
 
 // ── TTS via OpenAI /api/speak ──────────────────────────────────────────────
+// audioCtx must be passed in — it must have been created during a user gesture
+// (iOS Safari blocks AudioContext created outside a tap/click handler).
 
-async function speakSentence(text: string, voice: string): Promise<void> {
+async function speakSentence(text: string, voice: string, audioCtx: AudioContext): Promise<void> {
   try {
+    // Re-resume context if iOS suspended it (e.g. phone locked mid-session)
+    if (audioCtx.state === 'suspended') {
+      await audioCtx.resume();
+    }
     const res = await fetch('/api/speak', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, voice }),
     });
-    if (!res.ok || !res.body) return;
+    if (!res.ok) return;
     const arrayBuffer = await res.arrayBuffer();
-    const audioCtx = new AudioContext();
     const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
     return new Promise<void>((resolve) => {
       const source = audioCtx.createBufferSource();
@@ -265,6 +270,7 @@ export default function VoiceChat() {
 
   const ttsQueueRef = useRef<string[]>([]);
   const ttsDrainingRef = useRef(false);
+  const audioCtxRef = useRef<AudioContext | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const holdChunksRef = useRef<Blob[]>([]);
   const vadActiveRef = useRef(false);
@@ -278,9 +284,9 @@ export default function VoiceChat() {
 
     while (ttsQueueRef.current.length > 0) {
       const sentence = ttsQueueRef.current.shift()!;
-      if (ttsEnabledRef.current) {
+      if (ttsEnabledRef.current && audioCtxRef.current) {
         log(`TTS: speaking "${sentence.slice(0, 30)}..."`);
-        await speakSentence(sentence, ttsVoiceRef.current);
+        await speakSentence(sentence, ttsVoiceRef.current, audioCtxRef.current);
       } else {
         log(`TTS: muted, skipping "${sentence.slice(0, 30)}..."`);
       }
@@ -1049,15 +1055,18 @@ export default function VoiceChat() {
     setVoiceStateLogged('unlocked');
     setSessionStarted(true);
 
-    // Unlock iOS Audio
+    // Unlock iOS Audio — create the shared AudioContext during this user gesture
+    // and keep it alive in audioCtxRef for all subsequent TTS playback.
     try {
       const ctx = new AudioContext();
       await ctx.resume();
+      // Play a silent buffer to fully unlock the context on iOS
       const buffer = ctx.createBuffer(1, 1, 22050);
       const source = ctx.createBufferSource();
       source.buffer = buffer;
       source.connect(ctx.destination);
       source.start(0);
+      audioCtxRef.current = ctx;
     } catch { /* Non-fatal */ }
 
     // Start VAD — wait up to 5s for ONNX model to finish loading
