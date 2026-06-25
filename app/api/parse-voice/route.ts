@@ -54,19 +54,25 @@ Instructions:
 7. AI AGENT TAKE CARE: Set to true only if the user explicitly says something like "AI can handle this", "have the agent do it", "delegate to AI", etc. Omit otherwise.
 8. COMPLETENESS: Set to "complete" if dateToWorkOn AND priority are both present (title, description, and project are always generated so they don't affect completeness). Otherwise "partial".
 
-Return JSON in this exact shape:
+Return a JSON object in exactly this shape (example values shown):
 {
   "fields": {
-    "title": "string (always required)",
-    "description": "string (always required, ends with 'Original: <original title>')",
-    "dateToWorkOn": "YYYY-MM-DD (omit if not mentioned)",
-    "priority": "Urgent | High | Medium | Low (omit if not mentioned)",
-    "projectId": "matched project id (omit if genuinely unclear)",
-    "effort": "High | Medium | Low (omit if not mentioned)",
-    "aiAgentTakeCare": true (omit if not mentioned)
+    "title": "Review NCTC contract proposal",
+    "description": "User wants to review the contract before Tuesday's call.\n\nOriginal: nctc contract",
+    "dateToWorkOn": "2026-06-30",
+    "priority": "High",
+    "projectId": "abc-123",
+    "effort": "Medium",
+    "aiAgentTakeCare": true
   },
-  "completeness": "complete | partial"
-}`;
+  "completeness": "complete"
+}
+
+Field rules:
+- "title" and "description" must always be present.
+- "dateToWorkOn", "priority", "projectId", "effort", "aiAgentTakeCare" — include only when applicable per the instructions above. If not applicable, omit the key entirely (do not include null, empty string, or false).
+- "completeness" must be either "complete" or "partial".
+- Output only the JSON object. No explanation, no markdown fences.`;
 
   try {
     const result = await generateText({
@@ -86,7 +92,8 @@ Return JSON in this exact shape:
       parsed = JSON.parse(raw);
     } catch {
       console.error('[parse-voice] JSON parse failed. Raw AI output:', raw);
-      return Response.json({ error: 'AI response could not be parsed as JSON' }, { status: 500 });
+      const preview = raw.slice(0, 300);
+      return Response.json({ error: `AI response could not be parsed as JSON. Raw: ${preview}` }, { status: 500 });
     }
 
     return Response.json({ fields: parsed.fields ?? {}, completeness: parsed.completeness ?? 'partial' });
