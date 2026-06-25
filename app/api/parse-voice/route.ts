@@ -21,7 +21,7 @@ export async function POST(request: Request) {
   const today = getEasternDateString();
 
   const systemPrompt =
-    'You are a task cleanup assistant. You receive a voice transcript and a Notion task, and you return cleaned-up task fields as JSON. Return valid JSON only, no other text.';
+    'You are a task cleanup assistant. You receive a voice transcript and a Notion task, and you return cleaned-up task fields as JSON. Return valid JSON only, no markdown, no explanation. Your entire response must be a single line of compact JSON — no literal newlines or extra whitespace.';
 
   const projectList = projects
     .map((p) => `  - id: "${p.id}", name: "${p.name}"`)
@@ -82,17 +82,23 @@ Field rules:
     });
 
     // Strip markdown code fences if present
-    const raw = result.text
+    let raw = result.text
       .replace(/^```(?:json)?\s*/i, '')
       .replace(/\s*```$/, '')
       .trim();
+
+    // Replace literal newlines/tabs inside JSON string values with their escape sequences.
+    // LLMs sometimes emit them unescaped even when asked not to.
+    raw = raw.replace(/"((?:[^"\\]|\\.)*)"/g, (_match, inner: string) => {
+      return '"' + inner.replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t') + '"';
+    });
 
     let parsed: { fields: Record<string, unknown>; completeness: 'complete' | 'partial' };
     try {
       parsed = JSON.parse(raw);
     } catch {
       console.error('[parse-voice] JSON parse failed. Raw AI output:', raw);
-      const preview = raw.slice(0, 300);
+      const preview = raw.slice(0, 800);
       return Response.json({ error: `AI response could not be parsed as JSON. Raw: ${preview}` }, { status: 500 });
     }
 
