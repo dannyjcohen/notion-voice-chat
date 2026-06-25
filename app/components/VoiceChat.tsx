@@ -343,59 +343,72 @@ export default function VoiceChat() {
     }
   }, [fetchNextTask, addMessage]);
 
-  // ── Load session on mount ─────────────────────────────────────────────────
+  // ── Prefetch on mount (silent — no chat messages) ────────────────────────
+  // Runs immediately when the page loads so data is ready before the user taps.
 
-  const loadSession = useCallback(async () => {
-    log('loadSession: fetching projects + first task');
+  const prefetchDoneRef = useRef(false);
 
-    if (debugMode) {
-      addDebugMessage('📤 GET /api/projects — fetching project list');
-      addDebugMessage('📤 GET /api/tasks/next — skip list: (none)');
-    }
+  useEffect(() => {
+    if (prefetchDoneRef.current) return;
+    prefetchDoneRef.current = true;
 
-    const projectsStart = logApiStart('/api/projects');
-    const tasksStart = logApiStart('/api/tasks/next');
-    const [projectsRes, taskRes] = await Promise.all([
-      fetch('/api/projects'),
-      fetch('/api/tasks/next'),
-    ]);
-    logApiEnd('/api/projects', projectsRes.status, projectsStart);
-    logApiEnd('/api/tasks/next', taskRes.status, tasksStart);
+    const run = async () => {
+      log('prefetch: fetching projects + first task');
+      const projectsStart = logApiStart('/api/projects');
+      const tasksStart = logApiStart('/api/tasks/next');
+      const [projectsRes, taskRes] = await Promise.all([
+        fetch('/api/projects'),
+        fetch('/api/tasks/next'),
+      ]);
+      logApiEnd('/api/projects', projectsRes.status, projectsStart);
+      logApiEnd('/api/tasks/next', taskRes.status, tasksStart);
 
-    const projectsData = await projectsRes.json() as { projects: Project[] };
-    const taskData = await taskRes.json() as { task: Task | null };
+      const projectsData = await projectsRes.json() as { projects: Project[] };
+      const taskData = await taskRes.json() as { task: Task | null };
 
-    const projectsDuration = ((Date.now() - projectsStart) / 1000).toFixed(1);
-    const tasksDuration = ((Date.now() - tasksStart) / 1000).toFixed(1);
+      const projectsDuration = ((Date.now() - projectsStart) / 1000).toFixed(1);
+      const tasksDuration = ((Date.now() - tasksStart) / 1000).toFixed(1);
 
-    if (debugMode) {
+      addDebugMessage(`📤 GET /api/projects — fetching project list`);
+      addDebugMessage(`📤 GET /api/tasks/next — skip list: (none)`);
+
       const names = (projectsData.projects ?? []).map((p) => p.name).join(', ');
       addDebugMessage(
         `📥 /api/projects → ${projectsRes.status}  ${projectsDuration}s — loaded ${projectsData.projects?.length ?? 0} projects: ${names || '(none)'}`
       );
-    }
 
-    setProjects(projectsData.projects ?? []);
+      setProjects(projectsData.projects ?? []);
 
-    if (!taskData.task) {
-      if (debugMode) {
+      if (!taskData.task) {
         addDebugMessage(`📥 /api/tasks/next → ${taskRes.status}  ${tasksDuration}s — no more tasks`);
+        setSessionDone(true);
+        return;
       }
-      setSessionDone(true);
-      addMessage('assistant', 'All caught up — no more tasks to review!');
-      return;
-    }
 
-    if (debugMode) {
       const t = taskData.task;
       addDebugMessage(
         `📥 /api/tasks/next → ${taskRes.status}  ${tasksDuration}s — task: "${t.title}" (priority: ${t.priority ?? 'none'}, date: ${t.dateToWorkOn ?? 'none'})`
       );
-    }
+      setCurrentTask(taskData.task);
+    };
 
-    setCurrentTask(taskData.task);
-    addMessage('assistant', `Let's get started. First task: **${taskData.task.title}**`);
-  }, [log, addMessage, logApiStart, logApiEnd, debugMode, addDebugMessage]);
+    run().catch((err) => log(`prefetch error: ${err instanceof Error ? err.message : String(err)}`));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Start session (called on tap / type-instead — data already prefetched) ─
+
+  const loadSession = useCallback(() => {
+    // Data is already in state from prefetch. Just add the intro message.
+    if (currentTask) {
+      addMessage('assistant', `Let's get started. First task: **${currentTask.title}**`);
+    } else if (sessionDone) {
+      addMessage('assistant', 'All caught up — no more tasks to review!');
+    } else {
+      // Prefetch still in flight — show a brief loading message
+      addMessage('assistant', 'Loading your tasks…');
+    }
+  }, [currentTask, sessionDone, addMessage]);
 
   // ── Confirm / cancel pending update ──────────────────────────────────────
 
@@ -828,8 +841,8 @@ export default function VoiceChat() {
       setHoldToSpeak(true);
     }
 
-    // Load session data
-    await loadSession();
+    // Data already prefetched — just show intro message
+    loadSession();
   }, [voiceState, vad, loadSession, setVoiceStateLogged, log]);
 
   const handleTypeInstead = useCallback(async () => {
@@ -838,8 +851,8 @@ export default function VoiceChat() {
     setVoiceStateLogged('unlocked');
     setSessionStarted(true);
 
-    // Load session data — projects + first task
-    await loadSession();
+    // Data already prefetched — just show intro message
+    loadSession();
   }, [voiceState, loadSession, setVoiceStateLogged, log]);
 
   // ── Pause/restart VAD around TTS ─────────────────────────────────────────
