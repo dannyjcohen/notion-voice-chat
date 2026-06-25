@@ -1,10 +1,12 @@
 'use client';
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
+import Link from 'next/link';
 import TaskCard from './TaskCard';
 import StatusIndicator from './StatusIndicator';
 import DebugPanel from './DebugPanel';
 import { float32ArrayToWav } from '@/lib/audio';
+import { getSkipIds, addSkipId } from '@/lib/skipCache';
 import { useMicVAD } from '@ricky0123/vad-react';
 import { useDebugLog } from '@/hooks/useDebugLog';
 
@@ -162,7 +164,7 @@ export default function VoiceChat() {
   // New architecture state
   const [currentTask, setCurrentTask] = useState<Task | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [skipList, setSkipList] = useState<string[]>([]);
+  const [skipList, setSkipList] = useState<string[]>(() => getSkipIds());
   const [sessionDone, setSessionDone] = useState(false);
   const [sessionStarted, setSessionStarted] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -398,6 +400,7 @@ export default function VoiceChat() {
       if (action.action === 'skip' && currentTaskRef.current) {
         const newSkipList = [...skipListRef.current, currentTaskRef.current.id];
         setSkipList(newSkipList);
+        addSkipId(currentTaskRef.current.id);
         await fetchNextTask(newSkipList);
       } else if (action.action === 'confirm' && action.fields && currentTaskRef.current) {
         // Store pending update — user must confirm before anything touches Notion
@@ -1240,6 +1243,17 @@ export default function VoiceChat() {
           >
             or type instead
           </button>
+
+          <Link
+            href="/voice-dump"
+            className="mt-6 text-xs transition-colors focus:outline-none focus-visible:underline"
+            style={{ color: 'rgba(234, 239, 245, 0.30)' }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = 'rgba(234, 239, 245, 0.60)')}
+            onMouseLeave={(e) => (e.currentTarget.style.color = 'rgba(234, 239, 245, 0.30)')}
+            aria-label="Switch to voice dump mode"
+          >
+            Voice Dump
+          </Link>
         </div>
 
         <DebugPanel
