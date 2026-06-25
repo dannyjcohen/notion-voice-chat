@@ -52,6 +52,8 @@ export async function getNextTask(): Promise<NotionTask | null> {
  *
  * Filter logic:
  *   (Assigned contains Danny OR Status = Icebox)
+ *   AND Status != Completed
+ *   AND Status != In Review
  *   AND AI Clean Up Status != Completed
  *   AND AI Clean Up Status != In Progress
  *
@@ -78,6 +80,18 @@ export async function getNextTaskDirect(skipIds: string[]): Promise<NotionTask |
               },
             },
           ],
+        },
+        {
+          property: 'Status',
+          status: {
+            does_not_equal: 'Completed',
+          },
+        },
+        {
+          property: 'Status',
+          status: {
+            does_not_equal: 'In Review',
+          },
         },
         {
           property: 'AI Clean Up Status',

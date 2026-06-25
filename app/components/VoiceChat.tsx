@@ -343,6 +343,27 @@ export default function VoiceChat() {
     }
   }, [fetchNextTask, addMessage]);
 
+  // ── Projects localStorage cache ──────────────────────────────────────────
+
+  const PROJECTS_CACHE_KEY = 'nvc:projects';
+  const PROJECTS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
+
+  function loadCachedProjects(): Project[] | null {
+    try {
+      const raw = localStorage.getItem(PROJECTS_CACHE_KEY);
+      if (!raw) return null;
+      const { projects, cachedAt } = JSON.parse(raw) as { projects: Project[]; cachedAt: number };
+      if (Date.now() - cachedAt > PROJECTS_CACHE_TTL) return null;
+      return projects;
+    } catch { return null; }
+  }
+
+  function cacheProjects(projects: Project[]) {
+    try {
+      localStorage.setItem(PROJECTS_CACHE_KEY, JSON.stringify({ projects, cachedAt: Date.now() }));
+    } catch { /* storage full or unavailable */ }
+  }
+
   // ── Prefetch on mount (silent — no chat messages) ────────────────────────
   // Runs immediately when the page loads so data is ready before the user taps.
 
@@ -352,43 +373,82 @@ export default function VoiceChat() {
     if (prefetchDoneRef.current) return;
     prefetchDoneRef.current = true;
 
+    // Check for cache-bust signal
+    const shouldBustCache = new URLSearchParams(window.location.search).get('refresh') === 'projects';
+    if (shouldBustCache) {
+      try { localStorage.removeItem(PROJECTS_CACHE_KEY); } catch { /* ignore */ }
+    }
+
+    // Use window.location.search directly to avoid depending on debugMode state
+    // (which is set by a separate useEffect and may not be true yet when prefetch runs)
+    const isDebug = new URLSearchParams(window.location.search).get('debug') === '1';
+
     const run = async () => {
       log('prefetch: fetching projects + first task');
-      const projectsStart = logApiStart('/api/projects');
+
+      // ── Projects: try cache first ──────────────────────────────────────
+      const cachedProjects = loadCachedProjects();
+
+      let projectsFetch: Promise<Response> | null = null;
+      let projectsStart = 0;
+
+      if (cachedProjects) {
+        setProjects(cachedProjects);
+        if (isDebug) {
+          addDebugMessage(`📦 /api/projects — loaded ${cachedProjects.length} projects from cache`);
+        }
+      } else {
+        projectsStart = logApiStart('/api/projects');
+        projectsFetch = fetch('/api/projects');
+        if (isDebug) addDebugMessage(`📤 GET /api/projects — fetching project list`);
+      }
+
+      // ── Tasks: always fetch fresh ──────────────────────────────────────
       const tasksStart = logApiStart('/api/tasks/next');
+      if (isDebug) addDebugMessage(`📤 GET /api/tasks/next — skip list: (none)`);
+
+      const tasksFetch = fetch('/api/tasks/next');
+
+      // Await both in parallel (projects fetch may be null if using cache)
       const [projectsRes, taskRes] = await Promise.all([
-        fetch('/api/projects'),
-        fetch('/api/tasks/next'),
+        projectsFetch ?? Promise.resolve(null),
+        tasksFetch,
       ]);
-      logApiEnd('/api/projects', projectsRes.status, projectsStart);
+
       logApiEnd('/api/tasks/next', taskRes.status, tasksStart);
 
-      const projectsData = await projectsRes.json() as { projects: Project[] };
-      const taskData = await taskRes.json() as { task: Task | null };
+      // ── Process projects response (only if we fetched) ─────────────────
+      if (projectsRes !== null) {
+        logApiEnd('/api/projects', projectsRes.status, projectsStart);
+        const projectsData = await projectsRes.json() as { projects: Project[] };
+        const projectsDuration = ((Date.now() - projectsStart) / 1000).toFixed(1);
+        const names = (projectsData.projects ?? []).map((p) => p.name).join(', ');
+        if (isDebug) {
+          addDebugMessage(
+            `📥 /api/projects → ${projectsRes.status}  ${projectsDuration}s — loaded ${projectsData.projects?.length ?? 0} projects: ${names || '(none)'}`
+          );
+        }
+        const freshProjects = projectsData.projects ?? [];
+        setProjects(freshProjects);
+        cacheProjects(freshProjects);
+      }
 
-      const projectsDuration = ((Date.now() - projectsStart) / 1000).toFixed(1);
+      // ── Process task response ──────────────────────────────────────────
+      const taskData = await taskRes.json() as { task: Task | null };
       const tasksDuration = ((Date.now() - tasksStart) / 1000).toFixed(1);
 
-      addDebugMessage(`📤 GET /api/projects — fetching project list`);
-      addDebugMessage(`📤 GET /api/tasks/next — skip list: (none)`);
-
-      const names = (projectsData.projects ?? []).map((p) => p.name).join(', ');
-      addDebugMessage(
-        `📥 /api/projects → ${projectsRes.status}  ${projectsDuration}s — loaded ${projectsData.projects?.length ?? 0} projects: ${names || '(none)'}`
-      );
-
-      setProjects(projectsData.projects ?? []);
-
       if (!taskData.task) {
-        addDebugMessage(`📥 /api/tasks/next → ${taskRes.status}  ${tasksDuration}s — no more tasks`);
+        if (isDebug) addDebugMessage(`📥 /api/tasks/next → ${taskRes.status}  ${tasksDuration}s — no more tasks`);
         setSessionDone(true);
         return;
       }
 
       const t = taskData.task;
-      addDebugMessage(
-        `📥 /api/tasks/next → ${taskRes.status}  ${tasksDuration}s — task: "${t.title}" (priority: ${t.priority ?? 'none'}, date: ${t.dateToWorkOn ?? 'none'})`
-      );
+      if (isDebug) {
+        addDebugMessage(
+          `📥 /api/tasks/next → ${taskRes.status}  ${tasksDuration}s — task: "${t.title}" (priority: ${t.priority ?? 'none'}, date: ${t.dateToWorkOn ?? 'none'})`
+        );
+      }
       setCurrentTask(taskData.task);
     };
 
@@ -399,16 +459,25 @@ export default function VoiceChat() {
   // ── Start session (called on tap / type-instead — data already prefetched) ─
 
   const loadSession = useCallback(() => {
-    // Data is already in state from prefetch. Just add the intro message.
-    if (currentTask) {
-      addMessage('assistant', `Let's get started. First task: **${currentTask.title}**`);
+    // Read from ref, not state — avoids stale closure if the user taps before
+    // the prefetch useEffect's setCurrentTask re-render has propagated.
+    const task = currentTaskRef.current;
+    if (task) {
+      addMessage('assistant', `Let's get started. First task: **${task.title}**`);
     } else if (sessionDone) {
       addMessage('assistant', 'All caught up — no more tasks to review!');
     } else {
-      // Prefetch still in flight — show a brief loading message
-      addMessage('assistant', 'Loading your tasks…');
+      // Prefetch still in flight — poll the ref briefly then show the message
+      const wait = setInterval(() => {
+        if (currentTaskRef.current) {
+          clearInterval(wait);
+          addMessage('assistant', `Let's get started. First task: **${currentTaskRef.current.title}**`);
+        }
+      }, 100);
+      // Give up after 5 seconds (session done or genuine no-task state)
+      setTimeout(() => clearInterval(wait), 5000);
     }
-  }, [currentTask, sessionDone, addMessage]);
+  }, [sessionDone, addMessage]); // currentTask removed from deps — using ref instead
 
   // ── Confirm / cancel pending update ──────────────────────────────────────
 
