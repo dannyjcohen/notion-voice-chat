@@ -51,7 +51,7 @@ export async function getNextTask(): Promise<NotionTask | null> {
 /**
  * Fetch the next unreviewed task, excluding any task IDs in the skip list.
  *
- * Filter logic:
+ * Filter logic (default):
  *   Assigned contains Danny
  *   AND Status != Completed
  *   AND Status != In Review
@@ -59,51 +59,63 @@ export async function getNextTask(): Promise<NotionTask | null> {
  *   AND AI Clean Up Status != Completed
  *   AND AI Clean Up Status != In Progress
  *
+ * When includeInProgress is true (voice-dump mode), the
+ * "AI Clean Up Status != In Progress" filter is removed so that
+ * partially-reviewed tasks are surfaced for revisiting.
+ *
  * Sort: primary = Date To Work On ascending (nulls last via in-code sort),
  *       secondary = Priority (Urgent → High → Medium → Low → null) in code.
  */
-export async function getNextTaskDirect(skipIds: string[]): Promise<NotionTask | null> {
+export async function getNextTaskDirect(
+  skipIds: string[],
+  includeInProgress = false
+): Promise<NotionTask | null> {
+  const baseFilters: Parameters<typeof notion.databases.query>[0]['filter'][] = [
+    {
+      property: 'Assigned',
+      people: {
+        contains: DANNY_NOTION_USER_ID,
+      },
+    },
+    {
+      property: 'Status',
+      status: {
+        does_not_equal: 'Completed',
+      },
+    },
+    {
+      property: 'Status',
+      status: {
+        does_not_equal: 'In Review',
+      },
+    },
+    {
+      property: 'Status',
+      status: {
+        does_not_equal: 'Icebox',
+      },
+    },
+    {
+      property: 'AI Clean Up Status',
+      select: {
+        does_not_equal: 'Completed',
+      },
+    },
+  ];
+
+  if (!includeInProgress) {
+    baseFilters.push({
+      property: 'AI Clean Up Status',
+      select: {
+        does_not_equal: 'In Progress',
+      },
+    });
+  }
+
   const response = await notion.databases.query({
     database_id: DB_ID,
     filter: {
-      and: [
-        {
-          property: 'Assigned',
-          people: {
-            contains: DANNY_NOTION_USER_ID,
-          },
-        },
-        {
-          property: 'Status',
-          status: {
-            does_not_equal: 'Completed',
-          },
-        },
-        {
-          property: 'Status',
-          status: {
-            does_not_equal: 'In Review',
-          },
-        },
-        {
-          property: 'Status',
-          status: {
-            does_not_equal: 'Icebox',
-          },
-        },
-        {
-          property: 'AI Clean Up Status',
-          select: {
-            does_not_equal: 'Completed',
-          },
-        },
-        {
-          property: 'AI Clean Up Status',
-          select: {
-            does_not_equal: 'In Progress',
-          },
-        },
-      ],
+      and: baseFilters,
     } as Parameters<typeof notion.databases.query>[0]['filter'],
     sorts: [
       {
