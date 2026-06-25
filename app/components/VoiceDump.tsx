@@ -274,7 +274,11 @@ export default function VoiceDump() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ transcript: text, task, projects }),
         });
-        if (!parseRes.ok) throw new Error(`Parse-voice HTTP ${parseRes.status}`);
+        if (!parseRes.ok) {
+          let detail = '';
+          try { const e = await parseRes.json() as { error?: string }; detail = e.error ?? ''; } catch { /* ignore */ }
+          throw new Error(`Parse-voice HTTP ${parseRes.status}${detail ? ': ' + detail : ''}`);
+        }
         const parseData = await parseRes.json() as ParseVoiceResponse;
         setParseResult(parseData);
         setPageState('results');

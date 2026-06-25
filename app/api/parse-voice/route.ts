@@ -1,5 +1,5 @@
 import { generateText } from 'ai';
-import { model } from '@/lib/openrouter';
+import { model } from '@/lib/anthropic';
 import type { NotionTask, NotionProject } from '@/lib/notion';
 
 export const dynamic = 'force-dynamic';
